@@ -1,4 +1,6 @@
-This repository leverages a transformer-based oxidation state model to improve the LLM-based autoregressive approach for materials generation.
+# Materium
+This is the repository to leverage transformer based oxidation state model to facilitate the LLM based autoregressive approach for material generation.
+
 # Instructions
 
 ```bash
