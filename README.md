@@ -1,6 +1,4 @@
-# Materium
-This is the official repository for the paper ["Materium: An Autoregressive Approach for Material Generation"](https://doi.org/10.48550/arXiv.2512.07486)
-
+This repository leverages a transformer-based oxidation state model to improve the LLM-based autoregressive approach for materials generation.
 # Instructions
 
 ```bash
