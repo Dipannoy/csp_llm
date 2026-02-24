@@ -229,6 +229,139 @@ def get_condition_dict(model, conditions: Dict[str, Any], device):
 
     return processed_conditions
     
+# def generate_structure(
+#     model,
+#     tokenizer,
+#     max_len=100,
+#     device="cpu",
+#     temperature=1.0,
+#     top_p=0.9,
+#     conditions=None,
+#     classifier_guidance_weight=0.0,
+#     csp_oxi_mode = None,
+#     min_atoms: int = 2,
+#     max_atoms: int = 64,
+#     use_typical: bool = False,
+#     oxygen_penalty: float = 0.0,
+#     charge_neutral_bias: float = 0.0,
+# ):
+#     model.eval()
+#     sos = tokenizer._special_to_id["[SOS]"]
+#     eos = tokenizer._special_to_id["[EOS]"]
+#     atoms_tok = tokenizer._special_to_id["[ATOMS]"]
+#     lattice_tok = tokenizer._special_to_id["[LATTICE]"]
+    
+
+#     allowed_species_ids = None
+#     if  csp_oxi_mode == 'bertos' and conditions and "reduced_formula" in conditions:
+#         formula = conditions["reduced_formula"]
+#         try:
+#             # Predict the specific species (e.g., ['Sr|+2', 'Ti|+4', ...])
+#             bertos_species = tokenizer.os_predictor.predict_formula(formula)
+            
+#             # Map those strings to the Integer IDs in your tokenizer vocab
+#             allowed_species_ids = [
+#                 tokenizer._species_to_id[s] for s in bertos_species 
+#                 if s in tokenizer._species_to_id
+#             ]
+#             # Make unique to allow any predicted state to be picked at any atom slot
+#             allowed_species_ids = list(set(allowed_species_ids))
+#             print(f"Sampling constrained to BERTOS species: {[tokenizer._id_to_species[i] for i in allowed_species_ids]}")
+#         except Exception as e:
+#             print(f"Warning: BERTOS filtering setup failed: {e}") 
+    
+#     print('====================Allowed Species IDs==============================')
+#     print(allowed_species_ids)
+    
+
+#     generated = [sos, atoms_tok]
+
+#     if conditions is not None:
+#         conditions = get_condition_dict(model, conditions, device)
+
+#     state = make_debug_state()
+    
+#     # print('------Generated Length, ',generated)
+#     print('=======================Max Length=====================================')
+#     print(max_len)
+#     with torch.no_grad():
+#         while len(generated) < max_len:
+
+#             inp = torch.tensor([generated], dtype=torch.long, device=device)
+
+
+#             if classifier_guidance_weight > 0.0 and conditions:
+#                 logits_uncond = model(inp, conditions={})
+#                 print('=======================logit_uncond===========================')
+#                 print(logits_uncond)
+#                 logits_cond = model(inp, conditions=conditions)
+#                 print('=======================logit_cond===========================')
+#                 print(logits_cond)
+#                 logits = cfg_blend(
+#                     logits_uncond, logits_cond, classifier_guidance_weight
+#                 )
+#             else:
+#                 logits = model(inp, conditions=conditions)
+
+#             next_logits = logits[:, -1, :]  # [1, V]
+            
+#             print('=======================next logits===========================')
+#             print(next_logits)
+
+#             # 2. DEFINE THE DYNAMIC FORBID MASK
+#             forbid_mask = None
+#             if allowed_species_ids:
+#                 # Detect if the next token should be an atom species
+#                 atoms_section_start = generated.index(atoms_tok)
+#                 num_in_atoms = len(generated) - (atoms_section_start + 1)
+                
+#                 is_species_slot = False
+#                 if tokenizer.sequence_order == SequenceOrder.ATOMS_FIRST:
+#                     if num_in_atoms % 4 == 0: is_species_slot = True
+#                 else: # COORDS_FIRST
+#                     if num_in_atoms % 4 == 3: is_species_slot = True
+
+#                 if is_species_slot:
+#                     # Create mask (True = Forbidden)
+#                     forbid_mask = torch.ones(tokenizer.vocab_size, dtype=torch.bool, device=device)
+#                     # Allow only BERTOS species, special tokens, and lattice/quantized bins
+#                     forbid_mask[allowed_species_ids] = False
+#                     forbid_mask[tokenizer.quant_offset:] = False # Allow coordinates/lattice
+#                     for sid in tokenizer._special_to_id.values():
+#                         forbid_mask[sid] = False
+
+#             samp_kwargs = dict(
+#                 temperature=temperature,
+#                 top_p=0.99,
+#                 tail_bias=0.25,
+#                 uniform_mix=0.0,
+#                 squeeze=0.0,
+#                 typical_p=0.0,
+#             )
+#             # print('---------------------------Forbid Mask---------------------------')
+#             # print(forbid_mask)
+            
+
+#             next_token, entropy = sample_next_token(
+#                 logits=next_logits,
+#                 forbid_mask=forbid_mask,
+#                 logit_bias=None,
+#                 **samp_kwargs,
+#                 return_entropy=True,
+#             )
+
+
+#             print('==========================Next Token==========================')
+#             print(next_token)
+#             # state = debug_print_token(next_token, entropy, tokenizer, state)
+#             generated.append(next_token)
+
+#             if next_token == eos:
+#                 break
+
+#     return generated
+
+
 def generate_structure(
     model,
     tokenizer,
@@ -238,7 +371,7 @@ def generate_structure(
     top_p=0.9,
     conditions=None,
     classifier_guidance_weight=0.0,
-    csp_oxi_mode = None,
+    csp_oxi_mode=None,
     min_atoms: int = 2,
     max_atoms: int = 64,
     use_typical: bool = False,
@@ -251,28 +384,39 @@ def generate_structure(
     atoms_tok = tokenizer._special_to_id["[ATOMS]"]
     lattice_tok = tokenizer._special_to_id["[LATTICE]"]
     
-
+    target_counts = {}
+    current_counts = {}
+    total_target_atoms = 0
     allowed_species_ids = None
-    if  csp_oxi_mode == 'bertos' and conditions and "reduced_formula" in conditions:
+
+    # 1. SETUP STOICHIOMETRY CONSTRAINTS
+    if conditions and "reduced_formula" in conditions:
         formula = conditions["reduced_formula"]
-        try:
-            # Predict the specific species (e.g., ['Sr|+2', 'Ti|+4', ...])
-            bertos_species = tokenizer.os_predictor.predict_formula(formula)
-            
-            # Map those strings to the Integer IDs in your tokenizer vocab
-            allowed_species_ids = [
-                tokenizer._species_to_id[s] for s in bertos_species 
-                if s in tokenizer._species_to_id
-            ]
-            # Make unique to allow any predicted state to be picked at any atom slot
-            allowed_species_ids = list(set(allowed_species_ids))
-            print(f"Sampling constrained to BERTOS species: {[tokenizer._id_to_species[i] for i in allowed_species_ids]}")
-        except Exception as e:
-            print(f"Warning: BERTOS filtering setup failed: {e}") 
-    
-    # print('====================Allowed Species IDs==============================')
-    # print(allowed_species_ids)
-    
+        
+        # We use the literal composition from the formula provided by the user
+        comp = Composition(formula)
+        # We work with the integer amounts directly from the formula
+        target_counts = {str(el): int(count) for el, count in comp.items()}
+        total_target_atoms = sum(target_counts.values())
+        
+        # Initialize counts for each element
+        current_counts = {el: 0 for el in target_counts}
+        
+        if csp_oxi_mode == 'bertos':
+            try:
+                # Predict the specific species (e.g., ['Ba|+2', 'Cu|+2', 'O|-2', 'Y|+3'])
+                bertos_species = tokenizer.os_predictor.predict_formula(formula)
+                
+                # Map those strings to the Integer IDs in your tokenizer vocab
+                allowed_species_ids = [
+                    tokenizer._species_to_id[s] for s in bertos_species 
+                    if s in tokenizer._species_to_id
+                ]
+                # Make unique to allow any predicted state to be picked at any atom slot
+                allowed_species_ids = list(set(allowed_species_ids))
+                print(f"Sampling constrained to BERTOS species: {[tokenizer._id_to_species[i] for i in allowed_species_ids]}")
+            except Exception as e:
+                print(f"Warning: BERTOS filtering setup failed: {e}") 
 
     generated = [sos, atoms_tok]
 
@@ -280,14 +424,10 @@ def generate_structure(
         conditions = get_condition_dict(model, conditions, device)
 
     state = make_debug_state()
-    
-    # print('------Generated Length, ',generated)
 
     with torch.no_grad():
         while len(generated) < max_len:
-
             inp = torch.tensor([generated], dtype=torch.long, device=device)
-
 
             if classifier_guidance_weight > 0.0 and conditions:
                 logits_uncond = model(inp, conditions={})
@@ -302,25 +442,55 @@ def generate_structure(
 
             # 2. DEFINE THE DYNAMIC FORBID MASK
             forbid_mask = None
-            if allowed_species_ids:
-                # Detect if the next token should be an atom species
+            
+            if target_counts:
+                # Detect if we are picking a species
                 atoms_section_start = generated.index(atoms_tok)
                 num_in_atoms = len(generated) - (atoms_section_start + 1)
                 
+                # Check slot based on SequenceOrder
                 is_species_slot = False
                 if tokenizer.sequence_order == SequenceOrder.ATOMS_FIRST:
-                    if num_in_atoms % 4 == 0: is_species_slot = True
-                else: # COORDS_FIRST
-                    if num_in_atoms % 4 == 3: is_species_slot = True
+                    is_species_slot = (num_in_atoms % 4 == 0)
+                else:
+                    is_species_slot = (num_in_atoms % 4 == 3)
 
                 if is_species_slot:
                     # Create mask (True = Forbidden)
                     forbid_mask = torch.ones(tokenizer.vocab_size, dtype=torch.bool, device=device)
-                    # Allow only BERTOS species, special tokens, and lattice/quantized bins
-                    forbid_mask[allowed_species_ids] = False
-                    forbid_mask[tokenizer.quant_offset:] = False # Allow coordinates/lattice
-                    for sid in tokenizer._special_to_id.values():
-                        forbid_mask[sid] = False
+                    
+                    # Calculate how many atoms we have fully placed (species + 3 coords)
+                    current_total_atoms = sum(current_counts.values())
+                    
+                    if current_total_atoms >= total_target_atoms:
+                        # STOICHIOMETRY MET: Do NOT allow any more species IDs.
+                        # Force the model to move to LATTICE or EOS section
+                        forbid_mask[lattice_tok] = False
+                        forbid_mask[eos] = False
+                    else:
+                        # STOICHIOMETRY NOT MET: Determine which species are still needed
+                        legal_now = []
+                        for sid in allowed_species_ids:
+                            specie_str = tokenizer._id_to_species[sid]
+                            element_symbol = specie_str.split('|')[0]
+                            
+                            # Only allow the species if we haven't reached the count for that element
+                            if current_counts.get(element_symbol, 0) < target_counts.get(element_symbol, 0):
+                                legal_now.append(sid)
+                        
+                        # Apply the whitelist
+                        forbid_mask[legal_now] = False
+                        
+                        forbid_mask[lattice_tok] = True
+                        forbid_mask[eos] = True
+
+                    # ALWAYS ALLOW special tokens and quantized bins (x,y,z, lattice params)
+                    # This is necessary so the model can transition sections or pick coordinates
+                    for name, sid in tokenizer._special_to_id.items():
+                        # Only allow SOS/PAD/ATOMS here; LATTICE/EOS are handled above
+                        if name not in ["[LATTICE]", "[EOS]"]:
+                            forbid_mask[sid] = False
+                    forbid_mask[tokenizer.quant_offset:] = False
 
             samp_kwargs = dict(
                 temperature=temperature,
@@ -330,10 +500,8 @@ def generate_structure(
                 squeeze=0.0,
                 typical_p=0.0,
             )
-            # print('---------------------------Forbid Mask---------------------------')
-            # print(forbid_mask)
-            
 
+            # 3. SAMPLE THE NEXT TOKEN
             next_token, entropy = sample_next_token(
                 logits=next_logits,
                 forbid_mask=forbid_mask,
@@ -342,14 +510,20 @@ def generate_structure(
                 return_entropy=True,
             )
 
-            # state = debug_print_token(next_token, entropy, tokenizer, state)
+            # 4. UPDATE STOICHIOMETRY TRACKER
+            if target_counts and next_token in tokenizer._id_to_species:
+                token_str = tokenizer._id_to_species[next_token]
+                element_symbol = token_str.split('|')[0]
+                if element_symbol in current_counts:
+                    current_counts[element_symbol] += 1
+
+            # Update sequence
             generated.append(next_token)
 
             if next_token == eos:
                 break
 
     return generated
-
 
 # def generate_structure(
 #     model,
