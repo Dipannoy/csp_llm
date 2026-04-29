@@ -89,60 +89,9 @@ def put_dict_on_device(d: Dict[str, torch.Tensor], device):
     }
 
 
-def build_position_weights(
-    targets: torch.Tensor,
-    lattice_tok_id: int,
-    quant_offset: int,
-    num_special_tokens: int,
-    lattice_weight: float = 5.0,
-    species_weight: float = 2.0,
-    coord_weight: float = 1.0,
-) -> torch.Tensor:
-    """
-    Returns a per-position weight tensor (same shape as `targets`) that
-    upweights lattice tokens and element/species tokens relative to coordinate
-    tokens.  Special tokens ([SOS], [ATOMS], [LATTICE], [EOS], [PAD]) get
-    weight 1.0 (no boost) since they carry less structural information.
-
-    Token type detection (from target IDs):
-      - lattice quant : quant token that follows a [LATTICE] token  → lattice_weight
-      - species       : special_count <= id < quant_offset          → species_weight
-      - coord quant   : quant token before [LATTICE]                → coord_weight
-      - special / pad : everything else                             → 1.0
-    """
-    B, S = targets.shape
-    weights = torch.ones(B, S, dtype=torch.float32, device=targets.device)
-
-    # Detect positions strictly after the first [LATTICE] token in each row.
-    # cumsum trick: once [LATTICE] appears, all subsequent positions are > 0.
-    lattice_marker = (targets == lattice_tok_id).long().cumsum(dim=1)  # [B, S]
-    # Shift right by 1 so the [LATTICE] token itself is NOT considered inside the section
-    in_lattice = torch.cat(
-        [torch.zeros(B, 1, dtype=torch.long, device=targets.device), lattice_marker[:, :-1]],
-        dim=1,
-    ) > 0  # [B, S], bool
-
-    is_quant = targets >= quant_offset                              # coord or lattice bin
-    is_lattice_quant = is_quant & in_lattice
-    is_coord_quant   = is_quant & ~in_lattice
-    is_species = (targets >= num_special_tokens) & (targets < quant_offset)
-
-    weights[is_lattice_quant] = lattice_weight
-    weights[is_coord_quant]   = coord_weight
-    weights[is_species]       = species_weight
-
-    return weights
-
-
 def run_epoch(
-    model, optimizer, dataloader, device, is_train=True, ema_model=None, ema_decay=0.999,
-    tokenizer=None, lattice_weight=5.0, species_weight=2.0, coord_weight=1.0,keep_conditions=None,
+    model, optimizer, dataloader, device, is_train=True, ema_model=None, ema_decay=0.999
 ):
-    """
-    tokenizer: if provided, per-position loss weights are applied
-               (lattice tokens ×lattice_weight, species ×species_weight,
-                coord bins ×coord_weight).  Pass None to use flat cross-entropy.
-    """
     all_loss = []
     if is_train:
         model.train()
@@ -169,8 +118,6 @@ def run_epoch(
                 [k for k in conditions.keys() if not k.endswith("_mask")]
             )
             for k in condition_keys:
-                if k in (keep_conditions or set()):
-                    continue  # never drop conditions that are the sole trainable path
                 if np.random.random() < 0.5:
                     del conditions[k]
                     if f"{k}_mask" in condition_keys:
@@ -179,32 +126,11 @@ def run_epoch(
 
             conditions = put_dict_on_device(conditions, device)
 
-            # Build per-position loss weights when tokenizer is supplied
-            pos_weights = None
-            if tokenizer is not None:
-                pos_weights = build_position_weights(
-                    target_seq,
-                    lattice_tok_id=tokenizer._special_to_id["[LATTICE]"],
-                    quant_offset=tokenizer.quant_offset,
-                    num_special_tokens=len(tokenizer.special_tokens),
-                    lattice_weight=lattice_weight,
-                    species_weight=species_weight,
-                    coord_weight=coord_weight,
-                )
-
-            logits = model(input_seq, targets=target_seq, conditions=conditions,
-                           position_weights=pos_weights)
+            logits = model(input_seq, targets=target_seq, conditions=conditions)
             loss = model.last_loss
 
         if is_train:
-            # optimizer.zero_grad()
-            
-            if not loss.requires_grad:
-                # All trainable parameters were disconnected from this batch
-                # (e.g. the only trainable condition was randomly dropped).
-                # Skip backward to avoid RuntimeError.
-                all_loss.append(loss.item())
-                continue
+            optimizer.zero_grad()
             # loss.backward()
             # optimizer.step()
             scaler.scale(loss).backward()
@@ -268,12 +194,10 @@ def train_model(
             is_train=True,
             ema_model=ema_model,
             ema_decay=ema_decay,
-            tokenizer=tokenizer,
         )
         with torch.no_grad():
             mean_loss_test = run_epoch(
-                model, optimizer, dataloader_test, device, is_train=False,
-                tokenizer=tokenizer,
+                model, optimizer, dataloader_test, device, is_train=False
             )
 
         print(
@@ -469,10 +393,10 @@ if __name__ == "__main__":
     
     torch.set_num_threads(8)
     # Force 'spawn' method before any other logic
-    # try:
-    #     mp.set_start_method('spawn', force=True)
-    # except RuntimeError:
-    #     pass
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
 
     # ... now your argparse and dataset logic ...
     
@@ -787,4 +711,3 @@ if __name__ == "__main__":
         )
         print("Mattergen eval:")
         print(eval_output)
-
