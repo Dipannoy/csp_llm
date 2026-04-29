@@ -1,11 +1,4 @@
-
-
-
-
-
-
-
-This branch contains the default trainning of Materium.
+This branch adds weighted lattice loss for the training.
 
 
 <!--# Materium-->
