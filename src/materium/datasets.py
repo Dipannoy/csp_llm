@@ -372,7 +372,9 @@ def _tokenize_structure(idx, tokenizer=None, dataset=None):
 
     Returns:
         dict: A dictionary containing the tokenized structure.
+        
     """
+    # print('--------------------------coming to _tokenize_structure--------------------')
     data = dataset[idx]
     structure = Structure(
         lattice=Lattice(data["cell"]),
@@ -442,8 +444,8 @@ class CrystalDataset(Dataset):
                     _tokenize_structure, tokenizer=self.tokenizer, dataset=self.dataset
                 ),
                 indices,
-                max_workers=24,
-                chunksize=1024,
+                max_workers=24, #24
+                chunksize=1024, #1024
                 desc="Tokenizing",
                 total=len(self.dataset),
             )

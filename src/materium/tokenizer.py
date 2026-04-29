@@ -12,19 +12,20 @@ from transformers import AutoConfig, AutoModelForTokenClassification, BertTokeni
 from pymatgen.core.composition import Composition
 import sys
 import os
+import csv
 
 # Ensure the BERTOS directory is in the path so we can find the /tokenizer folder
 # Assuming BERTOS is in the root of your materium project
 BERTOS_PATH = os.path.abspath(os.path.join(os.getcwd(), "BERTOS"))
 
-sys.path.append(BERTOS_PATH)
+# sys.path.append(BERTOS_PATH)
 
-TOSS_PATH = os.path.abspath(os.path.join(os.getcwd(), "vendor", "TOSS", "toss"))
+TOSS_PATH = os.path.abspath(os.path.join(os.getcwd(), "vendor", "TOSS", "toss_GNN"))
 # Or if it is directly in the root TOSS folder:
 # TOSS_PATH = os.path.abspath(os.path.join(os.getcwd(), "TOSS", "toss"))
 
-if TOSS_PATH not in sys.path:
-    sys.path.append(TOSS_PATH)
+# if TOSS_PATH not in sys.path:
+sys.path.append(TOSS_PATH)
 
 # Debug print to verify
 
@@ -33,7 +34,11 @@ print(TOSS_PATH)
 import tempfile
 from pymatgen.io.cif import CifWriter
 # Import TOSS logic - ensure TOSS_PATH is in sys.path as done for BERTOS
-from Get_TOS import get_Oxidation_States
+# from Get_TOS import get_Oxidation_States
+from data_utils import *
+from dataset_utils_pyg import *
+from model_utils_pyg import *
+from Predict import Get_OS_by_models
 
 class SortingOrder(Enum):
     SPECIES = "species"
@@ -175,6 +180,15 @@ class TOSSPredictor:
         self.toss_path = os.path.abspath(toss_path)
         # Default connectivity tolerances for TOSS loop
         self.tolerance_list = [0.1, 0.2, 0.3, 0.4, 0.5]
+        
+        self.LP_model = pyg_Hetero_GCNPredictor(atom_feats=13, bond_feats=13, hidden_feats=[256,256,256,256], 
+                                   predictor_hidden_feats=64, n_tasks=2, predictor_dropout=0.3)
+        self.NC_model = pyg_GCNPredictor(in_feats=15, hidden_feats=[256, 256, 256, 256], 
+                            predictor_hidden_feats=64, n_tasks=12, predictor_dropout=0.3) 
+                            
+        self.LP_model.load_state_dict(torch.load(self.toss_path+"/models/pyg_Hetero_GCN_s_0608.pth"))
+        self.NC_model.load_state_dict(torch.load(self.toss_path+"/models/pyg_GCN_s_0609.pth"))
+
 
     def predict_structure(self, structure: Structure) -> Structure:
         """
@@ -182,27 +196,40 @@ class TOSSPredictor:
         and returns a decorated Structure.
         """
         # 1. TOSS needs a file on disk. We create a temporary one.
+        # print('-------------Entering into predict structure-----------------', file=sys.stderr, flush=True)
         with tempfile.TemporaryDirectory() as tmpdir:
-            temp_cif_name = "toss_temp.cif"
-            temp_cif_path = os.path.join(tmpdir, temp_cif_name)
+            struct_path = self.toss_path + '/structures_alex_mp_aug_3/'
             
-            # Write structure to CIF
+            pid = os.getpid()
+            formula = structure.composition.reduced_formula
+            
+            # Replace dots or slashes in formula just in case
+            clean_formula = formula.replace(".", "_").replace("/", "-")
+            
+            # The "Bulletproof" name: Formula + Unique Process ID
+            temp_cif_name = f"{clean_formula}_{pid}.cif"
+            # temp_cif_name = "toss_temp.cif"
+            temp_cif_path = os.path.join(struct_path, temp_cif_name)
+            
+
             CifWriter(structure).write_file(temp_cif_path)
+
+
             
             try:
-                # 2. Call TOSS with server=True to get the result objects
-                # filepath must be the dir, m_id is the filename
-                df, res = get_Oxidation_States(
-                    m_id=temp_cif_name,
-                    server=True,
-                    filepath=tmpdir,
-                    input_tolerance_list=self.tolerance_list
-                )
+
+
+                
+                toss = Get_OS_by_models(temp_cif_name, self.LP_model, self.NC_model)
+                pred_res = toss.NC_predict()
                 
                 # 3. Extract oxidation states (res.sum_of_valence is the tuned result)
-                ox_states = res.sum_of_valence
+                ox_states = pred_res["os"]
+                
+    
                 
                 if len(ox_states) != len(structure):
+                    print(f"TOSS returned {len(ox_states)} states for {len(structure)} sites.", file=sys.stderr, flush=True)
                     raise ValueError(f"TOSS returned {len(ox_states)} states for {len(structure)} sites.")
                 
                 # 4. Apply to structure sites
@@ -210,10 +237,19 @@ class TOSSPredictor:
                 for i, site in enumerate(structure):
                     new_species.append({str(site.specie): ox_states[i]})
                 
-                structure.replace_species(new_species)
+     
+                
+                oxi_states = [list(d.values())[0] for d in new_species]
+    
+             
+                structure.add_oxidation_state_by_site(oxi_states)
+
+                
+              
                 
             except Exception as e:
                 # Re-raise so the tokenizer's try-except can handle the fallback
+                print(f"TOSS prediction logic failed: {e} for {formula}", file=sys.stderr, flush=True)
                 raise RuntimeError(f"TOSS prediction logic failed: {e}")
                 
         return structure
@@ -272,7 +308,7 @@ class CrystalTokenizer:
 
 
         self.toss_predictor = TOSSPredictor(
-            toss_path="/work/dg47/MLEG/materium/materium/vendor/TOSS/toss/"
+            toss_path="/work/dg47/MLEG/materium/materium/vendor/TOSS"
         )
 
         if allowed_oxidation_states is None:
@@ -405,6 +441,7 @@ class CrystalTokenizer:
         
         if self.oxidation_mode == "guess":
             try:
+               
                 s = structure.copy()
                 s.add_oxidation_state_by_guess()
             except Exception as e:
@@ -417,10 +454,31 @@ class CrystalTokenizer:
                 print(f"BERTOS Failed: {e}.")
         elif self.oxidation_mode == "toss":
             try:
-                s = self.toss_predictor.predict_structure(s)
+               
+                s_temp = structure.copy()
+                
+                s = self.toss_predictor.predict_structure(s_temp)
             except Exception as e:
                 print(f"TOSS Failed: {e}. Falling back to guess.")
+                
+                
+                formula = structure.composition.reduced_formula
+            
+            # 2. Log the failure to a CSV file
+                error_log_path = "toss_prediction_failures_alex_mp_aug.csv"
+                file_exists = os.path.isfile(error_log_path)
+            
+                with open(error_log_path, mode='a', newline='') as f:
+                    writer = csv.writer(f)
+                    # Write header if the file was just created
+                    if not file_exists:
+                        writer.writerow(['model', 'formula'])
+                    
+                    # Log the specific failure
+                    writer.writerow(['toss', formula])
+                    
                 try:
+                    s = structure.copy()
                     s.add_oxidation_state_by_guess()
                 except:
                     pass
@@ -437,6 +495,8 @@ class CrystalTokenizer:
         Returns:
             List[int]: [SOS] [ATOMS] (elem|ox, 3*coords) ... [LATTICE] (6*lattice) [EOS]
         """
+        
+        # print('---------------Here is tokenize---------------------')
         tokens = [self._special_to_id["[SOS]"]]
 
         reduced_structure = structure.get_reduced_structure(reduction_algo="niggli")

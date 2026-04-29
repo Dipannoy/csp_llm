@@ -357,6 +357,7 @@ def load_model(args):
         so = getattr(tokenizer, "sequence_order", None)
         if so is None:
             # Kind of a fix for older versions of the tokenizer
+            print('=======================Sequesnce Order not found=======================')
             tokenizer = CrystalTokenizer(
                 element_vocab=ELEMENT_VOCAB,
                 lattice_stats=LATTICE_STATS,
@@ -475,7 +476,7 @@ if __name__ == "__main__":
     }
     
     # =========================================Tokenizer Prediction=================================================
-    
+    '''
     if args.csp_oxi_mode == 'bertos':
         tokenizer = CrystalTokenizer(
             element_vocab=ELEMENT_VOCAB,
@@ -485,6 +486,7 @@ if __name__ == "__main__":
             sequence_order=SequenceOrder.ATOMS_FIRST,
             oxidation_mode = 'bertos',
         )
+    '''
     # =========================================Tokenizer Prediction=================================================
     
     csp_oxi_mode = args.csp_oxi_mode
