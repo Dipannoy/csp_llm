@@ -22,7 +22,7 @@ class ConditionConfig:
     out_dim: int
 
     def __post_init__(self):
-        if self.proj_layer_type not in ["linear", "embedding", "formula"]:
+        if self.proj_layer_type not in ["linear", "embedding", "formula", "sg_fingerprint"]:
             raise ValueError(f"Unknown proj_layer_type: {self.proj_layer_type}")
 
 
@@ -432,6 +432,105 @@ class FormulaEmbedder(nn.Module):
         return padded_atom_sequences
 
 
+def _compute_sg_fingerprints() -> np.ndarray:
+    """
+    Precompute 16-dim binary fingerprints for all 230 space groups.
+    Called once during SpaceGroupEmbedding.__init__ to build the buffer.
+
+    Feature layout:
+      0-6  : crystal system one-hot (triclinic … cubic)
+      7    : centrosymmetric (has inversion centre)
+      8-11 : lattice centring one-hot (P / I / F / R; C/A/B → all zero)
+      12   : has 2-fold rotation axis  (SG ≥ 3)
+      13   : has 3-fold rotation axis  (SG ≥ 143)
+      14   : has 4-fold rotation axis  (tetragonal + cubic)
+      15   : has 6-fold rotation axis  (hexagonal)
+    """
+    from pymatgen.symmetry.groups import SpaceGroup as PmgSG
+
+    # Laue-class centrosymmetric SG numbers (from crystallographic tables)
+    _centrosymmetric = {
+        2, 10, 11, 12, 13, 14, 15, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+        57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
+        74, 83, 84, 85, 86, 87, 88, 123, 124, 125, 126, 127, 128, 129, 130,
+        131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 147, 148,
+        162, 163, 164, 165, 166, 167, 175, 176, 191, 192, 193, 194, 200, 201,
+        202, 203, 204, 205, 206, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230,
+    }
+    _systems = ["triclinic", "monoclinic", "orthorhombic",
+                "tetragonal", "trigonal", "hexagonal", "cubic"]
+
+    fingerprints = np.zeros((230, 16), dtype=np.float32)
+    for sg_num in range(1, 231):
+        sg = PmgSG.from_int_number(sg_num)
+        feat = np.zeros(16, dtype=np.float32)
+
+        # Bits 0-6: crystal system (one-hot)
+        sys_name = sg.crystal_system.lower()
+        if sys_name in _systems:
+            feat[_systems.index(sys_name)] = 1.0
+
+        # Bit 7: centrosymmetric
+        feat[7] = float(sg_num in _centrosymmetric)
+
+        # Bits 8-11: lattice centring derived from HM symbol first letter
+        centring = sg.symbol.strip()[0]
+        if centring == "P":
+            feat[8] = 1.0
+        elif centring == "I":
+            feat[9] = 1.0
+        elif centring == "F":
+            feat[10] = 1.0
+        elif centring == "R":
+            feat[11] = 1.0
+        # C/A/B base-centred: all four bits stay 0
+
+        # Bits 12-15: highest rotation axis present
+        feat[12] = float(sg_num >= 3)                                       # 2-fold
+        feat[13] = float(sg_num >= 143)                                     # 3-fold
+        feat[14] = float((75 <= sg_num <= 142) or (sg_num >= 195))         # 4-fold
+        feat[15] = float(168 <= sg_num <= 194)                             # 6-fold
+
+        fingerprints[sg_num - 1] = feat
+    return fingerprints
+
+
+class SpaceGroupEmbedding(nn.Module):
+    """
+    Symmetry-aware space group embedding that replaces plain nn.Embedding(230, dim).
+
+    A 16-dim crystallographic fingerprint (crystal system, centring, centrosymmetry,
+    rotation axes) is projected into the model's hidden dimension via a small MLP,
+    giving the model a meaningful geometric prior rather than an arbitrary random init.
+
+    Input / output shapes are identical to nn.Embedding, making this a drop-in
+    replacement inside append_condition:
+      Input:  (B, SeqLen) integer tensor, values in 1–230
+      Output: (B, SeqLen, hidden_dim)
+
+    Migration from a checkpoint trained with nn.Embedding:
+        LLamaTransformer.migrate_to_sg_fingerprint(src_ckpt, dst_ckpt)
+    """
+
+    def __init__(self, hidden_dim: int = 512):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        fps = _compute_sg_fingerprints()          # (230, 16), computed once
+        self.register_buffer("fingerprints", torch.tensor(fps, dtype=torch.float32))
+        self.projector = nn.Sequential(
+            nn.Linear(16, 64),
+            nn.SiLU(),
+            nn.Linear(64, hidden_dim),
+        )
+
+    def forward(self, sg_numbers: torch.Tensor) -> torch.Tensor:
+        orig_shape = sg_numbers.shape          # (B,) or (B, SeqLen)
+        flat = sg_numbers.reshape(-1)          # (N,)
+        fps = self.fingerprints[flat - 1]      # (N, 16)  — 1-indexed→0-indexed
+        out = self.projector(fps)              # (N, hidden_dim)
+        return out.reshape(*orig_shape, self.hidden_dim)  # (B [, SeqLen], hidden_dim)
+
+
 class LLamaTransformer(nn.Module):
     last_loss: Optional[torch.Tensor]
 
@@ -482,6 +581,8 @@ class LLamaTransformer(nn.Module):
                     self.cond_proj_layers[name] = FormulaEmbedder(
                         params.dim, self.tok_embeddings
                     )
+                elif cfg.proj_layer_type.lower() == "sg_fingerprint":
+                    self.cond_proj_layers[name] = SpaceGroupEmbedding(hidden_dim=params.dim)
                 else:
                     raise ValueError("No layer of type", cfg.proj_layer_type, "found")
 
@@ -546,6 +647,7 @@ class LLamaTransformer(nn.Module):
         targets: Optional[torch.Tensor] = None,
         conditions: Optional[Dict[str, torch.Tensor]] = {},
         return_hidden_states: bool = False,
+        position_weights: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
@@ -573,13 +675,27 @@ class LLamaTransformer(nn.Module):
                 h[:, -seqlen:, :]
             )  # Only calculate for the actual sequence not the conditions
 
-            self.last_loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                targets.reshape(-1),
-                ignore_index=self.pad_id,
-                weight=self.loss_weights,
-                label_smoothing=0.0,
-            )
+            if position_weights is not None:
+                # Per-position weighted loss: upweights lattice tokens, element tokens, etc.
+                per_tok = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    targets.reshape(-1),
+                    ignore_index=self.pad_id,
+                    weight=self.loss_weights,
+                    label_smoothing=0.0,
+                    reduction="none",
+                )
+                pad_mask = (targets.reshape(-1) != self.pad_id).float()
+                pw = position_weights.reshape(-1) * pad_mask
+                self.last_loss = (per_tok * pw).sum() / pw.sum().clamp(min=1)
+            else:
+                self.last_loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    targets.reshape(-1),
+                    ignore_index=self.pad_id,
+                    weight=self.loss_weights,
+                    label_smoothing=0.0,
+                )
         else:
             # inference-time mini-optimization: only forward the output on the very last position
             logits = self.output(
@@ -650,3 +766,86 @@ class LLamaTransformer(nn.Module):
         model.load_state_dict(checkpoint["state_dict"], strict=strict)
         del checkpoint["state_dict"]
         return model, checkpoint
+
+    @staticmethod
+    def migrate_to_sg_fingerprint(
+        src_ckpt_path: str,
+        dst_ckpt_path: str,
+        condition_name: str = "space_group",
+        n_fit_steps: int = 500,
+        fit_lr: float = 1e-3,
+    ) -> None:
+        """
+        One-time migration: loads a checkpoint whose 'space_group' condition was trained
+        with nn.Embedding, replaces it with SpaceGroupEmbedding (warm-started to
+        approximate the old embedding weights), and saves a new checkpoint.
+
+        After running this once you can fine-tune the model normally — no retraining
+        from scratch is required.  Only the ~34 K projector parameters are uninitialised
+        (they are warm-started here); all other weights transfer exactly.
+
+        Usage:
+            LLamaTransformer.migrate_to_sg_fingerprint(
+                "checkpoints/old_model.pt",
+                "checkpoints/sg_fingerprint_model.pt",
+            )
+        """
+        print(f"Loading source checkpoint: {src_ckpt_path}")
+        ckpt = torch.load(src_ckpt_path, map_location="cpu", weights_only=False)
+
+        # --- Build old model and extract its SG embedding weights ---
+        old_config = ModelArgs.from_dict(ckpt["model_config"])
+        old_model = LLamaTransformer(params=old_config)
+        old_model.load_state_dict(ckpt["state_dict"], strict=True)
+
+        if condition_name not in old_model.cond_proj_layers:
+            raise ValueError(
+                f"Condition '{condition_name}' not found in checkpoint. "
+                f"Available: {list(old_model.cond_proj_layers.keys())}"
+            )
+        old_layer = old_model.cond_proj_layers[condition_name]
+        if not isinstance(old_layer, nn.Embedding):
+            raise ValueError(
+                f"Expected nn.Embedding for '{condition_name}', got {type(old_layer)}. "
+                "Model may already be migrated."
+            )
+        # (230, dim) — the trained SG embedding matrix we want to approximate
+        old_sg_weight = old_layer.weight.data.clone()  # detach from old model
+        del old_model
+
+        # --- Build new config with sg_fingerprint ---
+        new_config_dict = old_config.to_dict()
+        new_config_dict["condition_config"][condition_name]["proj_layer_type"] = "sg_fingerprint"
+        new_config = ModelArgs.from_dict(new_config_dict)
+
+        # --- Build new model; load all weights except the replaced SG layer ---
+        new_model = LLamaTransformer(params=new_config)
+        missing, unexpected = new_model.load_state_dict(ckpt["state_dict"], strict=False)
+        sg_missing = [k for k in missing if condition_name in k]
+        print(f"SG embedding keys not loaded (expected): {sg_missing}")
+        if unexpected:
+            print(f"Unexpected keys (investigate): {unexpected}")
+
+        # --- Warm-start: fit projector so MLP(fingerprint[i]) ≈ old_sg_weight[i] ---
+        sg_emb: SpaceGroupEmbedding = new_model.cond_proj_layers[condition_name]
+        optimizer = torch.optim.Adam(sg_emb.projector.parameters(), lr=fit_lr)
+        sg_idx = torch.arange(1, 231, dtype=torch.long)  # (230,)
+        sg_emb.train()
+        print(f"Warm-starting SpaceGroupEmbedding projector for {n_fit_steps} steps...")
+        for step in range(n_fit_steps):
+            optimizer.zero_grad()
+            fps = sg_emb.fingerprints[sg_idx - 1]   # (230, 16)
+            pred = sg_emb.projector(fps)             # (230, hidden_dim)
+            loss = F.mse_loss(pred, old_sg_weight)
+            loss.backward()
+            optimizer.step()
+            if (step + 1) % 100 == 0:
+                print(f"  Step {step + 1}/{n_fit_steps}: MSE = {loss.item():.6f}")
+        sg_emb.eval()
+
+        # --- Save migrated checkpoint ---
+        new_ckpt = {k: v for k, v in ckpt.items() if k != "state_dict"}
+        new_ckpt["state_dict"] = new_model.state_dict()
+        new_ckpt["model_config"] = new_config
+        torch.save(new_ckpt, dst_ckpt_path)
+        print(f"Migrated checkpoint saved to: {dst_ckpt_path}")
