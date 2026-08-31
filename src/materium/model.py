@@ -12,6 +12,14 @@ from typing import Dict
 from enum import Enum
 from torch_scatter import scatter_add
 
+from materium.coord_loss import (
+    CoordLossConfig,
+    TokenLayout,
+    circular_soft_targets,
+    soft_target_entropy,
+    structured_token_loss,
+)
+
 
 @dataclass
 class ConditionConfig:
@@ -435,7 +443,13 @@ class FormulaEmbedder(nn.Module):
 class LLamaTransformer(nn.Module):
     last_loss: Optional[torch.Tensor]
 
-    def __init__(self, params: ModelArgs, loss_weights: Optional[torch.Tensor] = None):
+    def __init__(
+        self,
+        params: ModelArgs,
+        loss_weights: Optional[torch.Tensor] = None,
+        token_layout: Optional[TokenLayout] = None,
+        coord_loss_config: Optional[CoordLossConfig] = None,
+    ):
         super().__init__()
         self.params = params
         self.vocab_size = params.vocab_size
@@ -444,6 +458,29 @@ class LLamaTransformer(nn.Module):
         self.cond_cfg = self.params.condition_config
 
         self.register_buffer("loss_weights", loss_weights)
+
+        # Geometry-aware coordinate loss. Without both a layout and a config the
+        # model falls back to the original flat cross-entropy, which keeps every
+        # existing caller (generation, checkpoint tooling) working unchanged.
+        self.token_layout = token_layout
+        self.coord_loss_config = coord_loss_config
+        if token_layout is not None and coord_loss_config is not None:
+            kernel = circular_soft_targets(
+                token_layout.num_quant_bins, coord_loss_config.sigma_bins
+            )
+            # persistent=False: a 1024x1024 kernel is derived, not learned, and
+            # has no business inflating every checkpoint.
+            self.register_buffer("coord_target_kernel", kernel, persistent=False)
+            self.coord_loss_floor = soft_target_entropy(kernel)
+            print(
+                f"Coordinate loss: wrapped-Gaussian targets, sigma={coord_loss_config.sigma_bins} bins "
+                f"({coord_loss_config.sigma_bins / token_layout.num_quant_bins:.5f} fractional), "
+                f"weight={coord_loss_config.coord_weight}, hard_mix={coord_loss_config.hard_mix}. "
+                f"Irreducible floor of the coordinate term: {self.coord_loss_floor:.4f} nats."
+            )
+        else:
+            self.coord_target_kernel = None
+            self.coord_loss_floor = 0.0
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
         self.dropout = nn.Dropout(params.dropout)
@@ -508,6 +545,7 @@ class LLamaTransformer(nn.Module):
 
         # Initialize attribute for the loss of the last forward call. This will be set if the forward is called with a targets tensor.
         self.last_loss = None
+        self.last_metrics = {}
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -546,6 +584,7 @@ class LLamaTransformer(nn.Module):
         targets: Optional[torch.Tensor] = None,
         conditions: Optional[Dict[str, torch.Tensor]] = {},
         return_hidden_states: bool = False,
+        target_roles: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
@@ -573,19 +612,35 @@ class LLamaTransformer(nn.Module):
                 h[:, -seqlen:, :]
             )  # Only calculate for the actual sequence not the conditions
 
-            self.last_loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                targets.reshape(-1),
-                ignore_index=self.pad_id,
-                weight=self.loss_weights,
-                label_smoothing=0.0,
+            use_structured = (
+                self.coord_target_kernel is not None and target_roles is not None
             )
+            if use_structured:
+                self.last_loss, self.last_metrics = structured_token_loss(
+                    logits,
+                    targets,
+                    target_roles,
+                    kernel=self.coord_target_kernel,
+                    layout=self.token_layout,
+                    config=self.coord_loss_config,
+                    class_weights=self.loss_weights,
+                )
+            else:
+                self.last_loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    targets.reshape(-1),
+                    ignore_index=self.pad_id,
+                    weight=self.loss_weights,
+                    label_smoothing=0.0,
+                )
+                self.last_metrics = {}
         else:
             # inference-time mini-optimization: only forward the output on the very last position
             logits = self.output(
                 h[:, [-1], :]
             )  # note: using list [-1] to preserve the time dim
             self.last_loss = None
+            self.last_metrics = {}
 
         return logits
 
