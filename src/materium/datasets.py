@@ -13,7 +13,8 @@ from pymatgen.analysis.local_env import NearNeighbors
 from pymatgen.analysis.local_env import CrystalNN
 import os
 import re
-from tqdm.contrib.concurrent import process_map
+from concurrent.futures import ProcessPoolExecutor
+from tqdm import tqdm
 from materium.tokenizer import CrystalTokenizer
 
 
@@ -236,8 +237,17 @@ class MatterGenDataset(Dataset):
                 return None
         return None
 
-    def _load_optional_json(self, filename: str, default_value=None) -> Optional[List]:
-        """Loads an optional json file, returns None if not found, fills missing with default."""
+    def _load_optional_json(self, filename: str, default_value=None):
+        """Loads an optional json file.
+
+        Always returns a 2-tuple (data_list, mask_list).
+        When the file is missing or unusable, every value is set to
+        `default_value` and every mask entry is True (meaning "unknown").
+        """
+        def _default_result():
+            n = self.num_structures
+            return [default_value] * n, [True] * n
+
         filepath = os.path.join(self.data_path, filename)
         if os.path.exists(filepath):
             try:
@@ -246,9 +256,11 @@ class MatterGenDataset(Dataset):
 
                 if len(data) != self.num_structures:
                     print(
-                        f"Warning: Length mismatch for optional file {filename} ({len(data)}) vs num_structures ({self.num_structures}). Ignoring."
+                        f"Warning: Length mismatch for optional file {filename} "
+                        f"({len(data)}) vs num_structures ({self.num_structures}). "
+                        f"Filling with default value '{default_value}'."
                     )
-                    return None
+                    return _default_result()
 
                 processed_data = []
                 processed_mask = []
@@ -265,10 +277,11 @@ class MatterGenDataset(Dataset):
                 return processed_data, processed_mask
             except Exception as e:
                 print(
-                    f"Warning: Error loading or processing {filepath}: {e}. Ignoring."
+                    f"Warning: Error loading or processing {filepath}: {e}. "
+                    f"Filling with default value '{default_value}'."
                 )
-                return None
-        return None
+                return _default_result()
+        return _default_result()
 
     def __len__(self) -> int:
         return self.num_structures
@@ -363,18 +376,35 @@ class MatterGenDataset(Dataset):
         return sample_dict
 
 
-def _tokenize_structure(idx, tokenizer=None, dataset=None):
-    """
-    Tokenizes a single crystal structure.
+# ---------------------------------------------------------------------------
+# Worker-process globals — set once per process by _worker_initializer()
+# so that neither the tokenizer (containing PyTorch models) nor the dataset
+# (large numpy arrays) needs to be pickled for every task item.
+# ---------------------------------------------------------------------------
+_WORKER_TOKENIZER: "CrystalTokenizer | None" = None
+_WORKER_DATASET: "MatterGenDataset | None" = None
 
-    Args:
-        data_tuple (tuple): A tuple containing the data dictionary and the tokenizer.
 
-    Returns:
-        dict: A dictionary containing the tokenized structure.
-        
+def _worker_initializer(tokenizer_dict: dict, data_path: str) -> None:
+    """Called **once** per spawned worker process.
+
+    Reconstructs the tokenizer (including TOSS / BERTOS model loading) and
+    the dataset (reading .npy files from disk) inside the worker.  Because
+    this runs in the worker itself, nothing large is pickled through the
+    inter-process pipe — each task message is just a single integer index.
     """
-    # print('--------------------------coming to _tokenize_structure--------------------')
+    global _WORKER_TOKENIZER, _WORKER_DATASET
+    _WORKER_TOKENIZER = CrystalTokenizer.from_dict(tokenizer_dict)
+    _WORKER_DATASET = MatterGenDataset(
+        data_path, recalculate_cache=False, lattice_scaler=None
+    )
+
+
+def _tokenize_structure(idx: int) -> dict:
+    """Tokenize the structure at *idx* using the worker-local globals."""
+    tokenizer = _WORKER_TOKENIZER
+    dataset   = _WORKER_DATASET
+
     data = dataset[idx]
     structure = Structure(
         lattice=Lattice(data["cell"]),
@@ -385,12 +415,9 @@ def _tokenize_structure(idx, tokenizer=None, dataset=None):
     tokens = tokenizer.tokenize(structure)
 
     out_data = {
-        "band_gap": data["band_gap"].numpy().tolist(),  # Example scalar property ()
+        "band_gap": data["band_gap"].numpy().tolist(),
         "band_gap_mask": data["band_gap_mask"].numpy().tolist(),
-        "space_group": data["space_group"]
-        .numpy()
-        .tolist(),  # Example scalar property ()
-        # "space_group_mask": data["space_group_mask"].numpy().tolist(),
+        "space_group": data["space_group"].numpy().tolist(),
         "num_atoms": data["num_atoms"].numpy().tolist(),
         "reduced_formula": {
             k: v.numpy().tolist() for k, v in data["reduced_formula"].items()
@@ -403,13 +430,10 @@ def _tokenize_structure(idx, tokenizer=None, dataset=None):
         "mag_density": data["mag_density"].item(),
         "mag_density_mask": data["mag_density_mask"].item(),
     }
-
-    # The dictionary structure allows for adding other conditional data in the future
     return out_data
 
 
 import joblib
-from tqdm.contrib.concurrent import process_map
 
 
 class CrystalDataset(Dataset):
@@ -439,16 +463,25 @@ class CrystalDataset(Dataset):
         else:
             print("No cache found. Preprocessing and tokenizing data in parallel...")
             indices = np.arange(0, len(self.dataset))
-            self.processed_data = process_map(
-                partial(
-                    _tokenize_structure, tokenizer=self.tokenizer, dataset=self.dataset
-                ),
-                indices,
-                max_workers=24, #24
-                chunksize=1024, #1024
-                desc="Tokenizing",
-                total=len(self.dataset),
-            )
+            # Limit OpenBLAS/OMP/MKL threads per worker to 1 so that 24 workers
+            # don't exhaust RLIMIT_NPROC (each would otherwise spawn ~48 threads).
+            # These env vars are inherited by spawned child processes.
+            os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+            os.environ.setdefault("OMP_NUM_THREADS", "1")
+            os.environ.setdefault("MKL_NUM_THREADS", "1")
+            os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+            # Pass only lightweight ints as task messages; models and numpy
+            # arrays are loaded once per worker via the initializer.
+            with ProcessPoolExecutor(
+                max_workers=24,
+                initializer=_worker_initializer,
+                initargs=(self.tokenizer.to_dict(), self.dataset.data_path),
+            ) as executor:
+                self.processed_data = list(tqdm(
+                    executor.map(_tokenize_structure, indices, chunksize=1024),
+                    total=len(self.dataset),
+                    desc="Tokenizing",
+                ))
             print(f"Saving preprocessed data to cache: {self.cache_path}")
             joblib.dump(self.processed_data, self.cache_path)
 

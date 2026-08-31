@@ -197,61 +197,35 @@ class TOSSPredictor:
         """
         # 1. TOSS needs a file on disk. We create a temporary one.
         # print('-------------Entering into predict structure-----------------', file=sys.stderr, flush=True)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            struct_path = self.toss_path + '/structures_alex_mp_aug_3/'
-            
-            pid = os.getpid()
-            formula = structure.composition.reduced_formula
-            
-            # Replace dots or slashes in formula just in case
-            clean_formula = formula.replace(".", "_").replace("/", "-")
-            
-            # The "Bulletproof" name: Formula + Unique Process ID
-            temp_cif_name = f"{clean_formula}_{pid}.cif"
-            # temp_cif_name = "toss_temp.cif"
-            temp_cif_path = os.path.join(struct_path, temp_cif_name)
-            
+        formula = structure.composition.reduced_formula
+        try:
+            # Pass the structure in-memory — no CIF writing, no disk I/O.
+            # The Get_OS_by_models cache means the Excel file is also read only
+            # once per worker process, not once per structure.
+            toss = Get_OS_by_models(
+                mid=None,
+                LP_model=self.LP_model,
+                NC_model=self.NC_model,
+                structure=structure,
+            )
+            pred_res = toss.NC_predict()
 
-            CifWriter(structure).write_file(temp_cif_path)
+            ox_states = pred_res["os"]
 
+            if len(ox_states) != len(structure):
+                print(f"TOSS returned {len(ox_states)} states for {len(structure)} sites.",
+                      file=sys.stderr, flush=True)
+                raise ValueError(
+                    f"TOSS returned {len(ox_states)} states for {len(structure)} sites."
+                )
 
-            
-            try:
+            structure.add_oxidation_state_by_site(ox_states)
 
+        except Exception as e:
+            # Re-raise so the tokenizer's try-except can handle the fallback
+            print(f"TOSS prediction logic failed: {e} for {formula}", file=sys.stderr, flush=True)
+            raise RuntimeError(f"TOSS prediction logic failed: {e}")
 
-                
-                toss = Get_OS_by_models(temp_cif_name, self.LP_model, self.NC_model)
-                pred_res = toss.NC_predict()
-                
-                # 3. Extract oxidation states (res.sum_of_valence is the tuned result)
-                ox_states = pred_res["os"]
-                
-    
-                
-                if len(ox_states) != len(structure):
-                    print(f"TOSS returned {len(ox_states)} states for {len(structure)} sites.", file=sys.stderr, flush=True)
-                    raise ValueError(f"TOSS returned {len(ox_states)} states for {len(structure)} sites.")
-                
-                # 4. Apply to structure sites
-                new_species = []
-                for i, site in enumerate(structure):
-                    new_species.append({str(site.specie): ox_states[i]})
-                
-     
-                
-                oxi_states = [list(d.values())[0] for d in new_species]
-    
-             
-                structure.add_oxidation_state_by_site(oxi_states)
-
-                
-              
-                
-            except Exception as e:
-                # Re-raise so the tokenizer's try-except can handle the fallback
-                print(f"TOSS prediction logic failed: {e} for {formula}", file=sys.stderr, flush=True)
-                raise RuntimeError(f"TOSS prediction logic failed: {e}")
-                
         return structure
 
 class CrystalTokenizer:
@@ -371,7 +345,7 @@ class CrystalTokenizer:
             "allowed_oxidation_states": self.allowed_oxidation_states,
             "fallback_to_zero_on_unseen": self.fallback_to_zero_on_unseen,
         }
-        return config
+        return config 
 
     @classmethod
     def from_dict(cls, json_data: Dict[str, any]) -> "CrystalTokenizer":
@@ -465,7 +439,7 @@ class CrystalTokenizer:
                 formula = structure.composition.reduced_formula
             
             # 2. Log the failure to a CSV file
-                error_log_path = "toss_prediction_failures_alex_mp_aug.csv"
+                error_log_path = "toss_prediction_failures_mp20_unigenx_aug.csv"
                 file_exists = os.path.isfile(error_log_path)
             
                 with open(error_log_path, mode='a', newline='') as f:

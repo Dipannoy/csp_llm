@@ -1,4 +1,5 @@
 import random
+from functools import partial
 import torch
 import numpy as np
 from pymatgen.core.structure import Structure
@@ -501,20 +502,18 @@ if __name__ == "__main__":
         recalculate_cache=False,
     )
 
+    _collate_fn = partial(pad_collate_fn, pad_token_id=tokenizer._special_to_id["[PAD]"])
+
     train_loader = DataLoader(
         train_crystals,
         batch_size=BATCH_SIZE,
-        collate_fn=lambda b: pad_collate_fn(
-            b, pad_token_id=tokenizer._special_to_id["[PAD]"]
-        ),
+        collate_fn=_collate_fn,
         num_workers=2,
     )
     test_loader = DataLoader(
         test_crystals,
         batch_size=BATCH_SIZE,
-        collate_fn=lambda b: pad_collate_fn(
-            b, pad_token_id=tokenizer._special_to_id["[PAD]"]
-        ),
+        collate_fn=_collate_fn,
         num_workers=2,
     )
 
@@ -612,9 +611,12 @@ if __name__ == "__main__":
         optimizer = configure_optimizer(model, type="adamw")
         # optimizer.load_state_dict(ckpt["optimizer"])
         # model = torch.compile(model) # This actually is slower?
+
+    
+    exp_name = "train_"+dataset_name+"_"+ox_mode
         
     wandb.login(key="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", relogin=True)
-    wandb.init(entity="dipannoydip",project="materium_bertos", config=model_params)
+    wandb.init(entity="dipannoydip",project="materium_bertos",name=exp_name, config=model_params)
     wandb.define_metric("epoch") # Define the epoch metric
     wandb.define_metric("train_loss", step_metric="epoch")
     wandb.define_metric("val_loss", step_metric="epoch")
