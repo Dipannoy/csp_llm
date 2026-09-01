@@ -22,6 +22,7 @@ from mattersim.forcefield.potential import MatterSimCalculator
 from mattersim.applications.relax import Relaxer
 from materium.generation_utils import generate_structure
 from materium.model import ConditionConfig, LLamaTransformer, ModelArgs, RopeMode
+from materium.coord_loss import CoordLossConfig
 from materium.datasets import (
     StandardScaler,
     get_spacegroup_int_number_fast,
@@ -30,7 +31,7 @@ from materium.datasets import (
     pad_collate_fn,
 )
 from mattergen.evaluation.utils.utils import compute_rmsd_angstrom
-from collections import Counter, deque
+from collections import Counter, deque, defaultdict
 from mattergen.evaluation.evaluate import evaluate
 
 from pymatgen.io.ase import AseAtomsAdaptor
@@ -94,6 +95,8 @@ def run_epoch(
     model, optimizer, dataloader, device, is_train=True, ema_model=None, ema_decay=0.999
 ):
     all_loss = []
+    metric_sums = defaultdict(float)
+    metric_counts = defaultdict(int)
     if is_train:
         model.train()
     else:
@@ -127,7 +130,16 @@ def run_epoch(
 
             conditions = put_dict_on_device(conditions, device)
 
-            logits = model(input_seq, targets=target_seq, conditions=conditions)
+            target_roles = batch.get("target_roles")
+            if target_roles is not None:
+                target_roles = target_roles.to(device)
+
+            logits = model(
+                input_seq,
+                targets=target_seq,
+                conditions=conditions,
+                target_roles=target_roles,
+            )
             loss = model.last_loss
 
         if is_train:
@@ -152,13 +164,17 @@ def run_epoch(
         #     wandb.log({"val_loss": loss.item()})
 
         all_loss.append(loss.item())
+        for name, value in model.last_metrics.items():
+            metric_sums[name] += value
+            metric_counts[name] += 1
 
         if (batch_idx + 1) % 50 == 0:
             print(
                 f"Batch Idx {batch_idx} Loss (last 100): {np.mean(all_loss[-100:]):.4f}"
             )
 
-    return np.mean(all_loss)
+    metrics = {k: metric_sums[k] / max(metric_counts[k], 1) for k in metric_sums}
+    return np.mean(all_loss), metrics
 
 
 def init_ema(model, decay=0.999, device="cuda"):
@@ -187,7 +203,7 @@ def train_model(
     print("--- Starting Training ---")
     best_val_loss = 1e10
     for epoch in range(start_epoch, epochs):
-        mean_loss_train = run_epoch(
+        mean_loss_train, train_metrics = run_epoch(
             model,
             optimizer,
             dataloader_train,
@@ -197,20 +213,30 @@ def train_model(
             ema_decay=ema_decay,
         )
         with torch.no_grad():
-            mean_loss_test = run_epoch(
+            mean_loss_test, test_metrics = run_epoch(
                 model, optimizer, dataloader_test, device, is_train=False
             )
 
         print(
             f"Epoch {epoch}/{epochs} Mean Train loss {mean_loss_train:.3f} Mean Test loss: {mean_loss_test:.3f}"
         )
+        if test_metrics:
+            # A single scalar hides which group has saturated, which is exactly
+            # the question when the model converges almost immediately.
+            print(
+                "  val  "
+                + "  ".join(f"{k}={v:.4f}" for k, v in sorted(test_metrics.items()))
+            )
         scheduler.step(mean_loss_test)
-        
-        wandb.log({
-                "epoch": epoch,
-                "train_loss": mean_loss_train,
-                "val_loss": mean_loss_test
-            })
+
+        log_payload = {
+            "epoch": epoch,
+            "train_loss": mean_loss_train,
+            "val_loss": mean_loss_test,
+        }
+        log_payload.update({f"train_{k}": v for k, v in train_metrics.items()})
+        log_payload.update({f"val_{k}": v for k, v in test_metrics.items()})
+        wandb.log(log_payload)
 
         if mean_loss_test < best_val_loss:
             os.makedirs(ckpt_path, exist_ok=True)
@@ -229,7 +255,7 @@ def train_model(
             if ema_model is not None:
 
                 with torch.no_grad():
-                    mean_loss_test_ema = run_epoch(
+                    mean_loss_test_ema, _ = run_epoch(
                         ema_model.to(device),
                         optimizer,
                         dataloader_test,
@@ -443,6 +469,39 @@ if __name__ == "__main__":
         default="alex_mp_20",
         help="select dataset",
     )
+    parser.add_argument(
+        "--coord_sigma_bins",
+        type=float,
+        default=2.0,
+        help="Width of the wrapped-Gaussian coordinate target, in bins. 0 disables smoothing.",
+    )
+    parser.add_argument(
+        "--coord_weight",
+        type=float,
+        default=1.0,
+        help="Weight of the coordinate loss term relative to the rest of the sequence.",
+    )
+    parser.add_argument(
+        "--coord_hard_mix",
+        type=float,
+        default=0.0,
+        help="Blend back toward one-hot CE on coordinates (1.0 reproduces the original loss).",
+    )
+    parser.add_argument(
+        "--no_translation_augment",
+        action="store_true",
+        help="Disable random global translation of fractional coordinates during training.",
+    )
+    parser.add_argument(
+        "--legacy_bin_grid",
+        action="store_true",
+        help="Keep the old encode grid so an existing token cache stays valid (skips re-tokenization).",
+    )
+    parser.add_argument(
+        "--legacy_loss",
+        action="store_true",
+        help="Use the original flat cross-entropy, for an A/B baseline.",
+    )
     args = parser.parse_args()
     
     
@@ -452,6 +511,7 @@ if __name__ == "__main__":
     epoch = args.epochs
     checkpoint_dir = args.check_dir
     dataset_name = args.dataset
+    TRANSLATION_AUGMENT = not args.no_translation_augment
     torch.set_num_threads(8)
 
     ELEMENT_VOCAB = [Element.from_Z(i).symbol for i in range(1, 100)]
@@ -487,33 +547,50 @@ if __name__ == "__main__":
         sorting_order=SortingOrder.REVERSE_SPECIES,  # SortingOrder.SPECIES,
         sequence_order=SequenceOrder.ATOMS_FIRST,
         oxidation_mode = ox_mode,
+        legacy_bin_grid=args.legacy_bin_grid,
     )
     print("TOKENIZER SORTING ORDER", tokenizer.sorting_order, tokenizer.sequence_order)
     train_crystals = CrystalDataset(
         train_dataset,
         tokenizer,
-        cache_path=f"v3_oxy_crystal_token_cache_latticelast_{dataset_name}_{ox_mode}_train_so{tokenizer.sorting_order.value}_seq{tokenizer.sequence_order}.joblib",
+        cache_path=f"{'v3' if args.legacy_bin_grid else 'v4grid'}_oxy_crystal_token_cache_latticelast_{dataset_name}_{ox_mode}_train_so{tokenizer.sorting_order.value}_seq{tokenizer.sequence_order}.joblib",
         recalculate_cache=False,
     )
     test_crystals = CrystalDataset(
         test_dataset,
         tokenizer,
-        cache_path=f"v3_oxy_crystal_token_cache_latticelast_{dataset_name}_{ox_mode}_test_so{tokenizer.sorting_order.value}_seq{tokenizer.sequence_order}.joblib",
+        cache_path=f"{'v3' if args.legacy_bin_grid else 'v4grid'}_oxy_crystal_token_cache_latticelast_{dataset_name}_{ox_mode}_test_so{tokenizer.sorting_order.value}_seq{tokenizer.sequence_order}.joblib",
         recalculate_cache=False,
     )
 
-    _collate_fn = partial(pad_collate_fn, pad_token_id=tokenizer._special_to_id["[PAD]"])
+    token_layout = tokenizer.token_layout()
+
+    # Origin is arbitrary in the source data, so a random global shift is a
+    # label-preserving augmentation. Train only -- validation must stay
+    # deterministic to be comparable across epochs.
+    _train_collate_fn = partial(
+        pad_collate_fn,
+        pad_token_id=tokenizer._special_to_id["[PAD]"],
+        token_layout=token_layout,
+        translation_augment=TRANSLATION_AUGMENT,
+    )
+    _eval_collate_fn = partial(
+        pad_collate_fn,
+        pad_token_id=tokenizer._special_to_id["[PAD]"],
+        token_layout=token_layout,
+        translation_augment=False,
+    )
 
     train_loader = DataLoader(
         train_crystals,
         batch_size=BATCH_SIZE,
-        collate_fn=_collate_fn,
+        collate_fn=_train_collate_fn,
         num_workers=2,
     )
     test_loader = DataLoader(
         test_crystals,
         batch_size=BATCH_SIZE,
-        collate_fn=_collate_fn,
+        collate_fn=_eval_collate_fn,
         num_workers=2,
     )
 
@@ -592,7 +669,26 @@ if __name__ == "__main__":
     
     
         start_epoch = 0
-        model = LLamaTransformer(model_params, loss_weights=None).to(DEVICE)
+        coord_loss_config = (
+            None
+            if args.legacy_loss
+            else CoordLossConfig(
+                sigma_bins=args.coord_sigma_bins,
+                coord_weight=args.coord_weight,
+                hard_mix=args.coord_hard_mix,
+            )
+        )
+        print(
+            f"Translation augmentation: {TRANSLATION_AUGMENT} | "
+            f"bin grid: {'legacy' if args.legacy_bin_grid else 'consistent'} | "
+            f"loss: {'flat cross-entropy' if args.legacy_loss else 'structured'}"
+        )
+        model = LLamaTransformer(
+            model_params,
+            loss_weights=None,
+            token_layout=token_layout,
+            coord_loss_config=coord_loss_config,
+        ).to(DEVICE)
         ckpt_path = os.path.join(
             os.path.dirname(__file__),
             "checkpoints",

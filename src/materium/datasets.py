@@ -16,6 +16,11 @@ import re
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 from materium.tokenizer import CrystalTokenizer
+from materium.coord_loss import (
+    TokenLayout,
+    apply_translation_augmentation,
+    build_token_roles,
+)
 
 
 class StandardScaler:
@@ -520,7 +525,12 @@ class CrystalDataset(Dataset):
 from torch.nn.utils.rnn import pad_sequence
 
 
-def pad_collate_fn(batch: List[torch.Tensor], pad_token_id: int = 0):
+def pad_collate_fn(
+    batch: List[torch.Tensor],
+    pad_token_id: int = 0,
+    token_layout: Optional[TokenLayout] = None,
+    translation_augment: bool = False,
+):
     """
     A simple collate function that pads sequences to the maximum length in a batch.
 
@@ -539,6 +549,17 @@ def pad_collate_fn(batch: List[torch.Tensor], pad_token_id: int = 0):
     padded_tokens = pad_sequence(
         batch_tokens, batch_first=True, padding_value=pad_token_id
     )
+
+    target_roles = None
+    if token_layout is not None:
+        # Roles are structural, so they are unaffected by the augmentation below
+        # (a cyclic bin shift maps the bin range onto itself).
+        roles, coord_axis = build_token_roles(padded_tokens, token_layout)
+        if translation_augment:
+            padded_tokens = apply_translation_augmentation(
+                padded_tokens, roles, coord_axis, token_layout
+            )
+        target_roles = roles[:, 1:].contiguous()
 
     # The model's input is everything but the last token
     # The model's target is everything but the first token (shifted)
@@ -591,5 +612,7 @@ def pad_collate_fn(batch: List[torch.Tensor], pad_token_id: int = 0):
 
     conditions["reduced_formula"] = collated_formula_dict
     final_batch = {"tokens": input_seq, "targets": target_seq, "conditions": conditions}
+    if target_roles is not None:
+        final_batch["target_roles"] = target_roles
 
     return final_batch

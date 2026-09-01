@@ -14,6 +14,8 @@ import sys
 import os
 import csv
 
+from materium.coord_loss import TokenLayout
+
 # Ensure the BERTOS directory is in the path so we can find the /tokenizer folder
 # Assuming BERTOS is in the root of your materium project
 BERTOS_PATH = os.path.abspath(os.path.join(os.getcwd(), "BERTOS"))
@@ -248,6 +250,7 @@ class CrystalTokenizer:
         oxidation_mode: str = "guess",
         allowed_oxidation_states: Optional[Dict[str, List[int]]] = None,
         fallback_to_zero_on_unseen: bool = True,
+        legacy_bin_grid: bool = False,
     ):
         """
         Args:
@@ -260,8 +263,16 @@ class CrystalTokenizer:
             allowed_oxidation_states (dict): Per-element allowed oxidation states. If None, uses
                                              Element.common_oxidation_states (or Element.oxidation_states if empty) plus 0.
             fallback_to_zero_on_unseen (bool): If True, use ox=0 if guessed ox not in allowed set; else raise.
+            legacy_bin_grid (bool): Keep the original encode grid, which quantised with
+                `floor(x * (num_bins - 1))` while detokenize decodes with `(bin + 0.5) / num_bins`.
+                Those are two different grids, so a round trip is skewed by up to one bin and
+                the top bin is unreachable for coordinates. The default (False) makes encode
+                and decode agree on bin centres, which a distance-aware coordinate loss
+                requires. Set True only to stay compatible with an existing token cache or
+                checkpoint built under the old convention.
         """
         self.num_quant_bins = num_quant_bins
+        self.legacy_bin_grid = legacy_bin_grid
         self.lattice_stats = lattice_stats
         self._lattice_param_keys = ["a", "b", "c", "alpha", "beta", "gamma"]
         self.sorting_order = sorting_order
@@ -344,8 +355,9 @@ class CrystalTokenizer:
             "oxidation_mode": self.oxidation_mode,
             "allowed_oxidation_states": self.allowed_oxidation_states,
             "fallback_to_zero_on_unseen": self.fallback_to_zero_on_unseen,
+            "legacy_bin_grid": self.legacy_bin_grid,
         }
-        return config 
+        return config
 
     @classmethod
     def from_dict(cls, json_data: Dict[str, any]) -> "CrystalTokenizer":
@@ -360,8 +372,35 @@ class CrystalTokenizer:
         """
         json_data["sorting_order"] = SortingOrder[json_data["sorting_order"]]
         json_data["sequence_order"] = SequenceOrder[json_data["sequence_order"]]
+        # A config without this key was written before the grid fix, so it
+        # describes a tokenizer that used the legacy grid. Reproduce it faithfully
+        # rather than silently changing conventions under an old checkpoint.
+        json_data.setdefault("legacy_bin_grid", True)
 
         return cls(**json_data)
+
+    def token_layout(self) -> "TokenLayout":
+        """Describe the token stream so the loss can recover position roles."""
+        return TokenLayout(
+            atoms_token_id=self._special_to_id["[ATOMS]"],
+            lattice_token_id=self._special_to_id["[LATTICE]"],
+            pad_id=self._special_to_id["[PAD]"],
+            quant_offset=self.quant_offset,
+            num_quant_bins=self.num_quant_bins,
+            block_size=4,
+            coords_first=self.sequence_order == SequenceOrder.COORDS_FIRST,
+        )
+
+    def _quantize_unit(self, value: float) -> int:
+        """Quantize a value in [0, 1] to a bin index in [0, num_quant_bins - 1].
+
+        Bin i covers [i / B, (i+1) / B) and has centre (i + 0.5) / B, which is
+        exactly what `detokenize` decodes -- so encode and decode share one grid.
+        """
+        if self.legacy_bin_grid:
+            return int(np.floor(np.clip(value, 0.0, 1.0) * (self.num_quant_bins - 1)))
+        scaled = int(np.floor(np.clip(value, 0.0, 1.0) * self.num_quant_bins))
+        return min(scaled, self.num_quant_bins - 1)
 
     def _normalize_lattice_param(self, value: float, param_key: str) -> float:
         """Scales a lattice parameter to the [0, 1] range."""
@@ -546,8 +585,7 @@ class CrystalTokenizer:
 
             element_token = self._species_to_id[species_key]
             coord_tokens = [
-                int(np.floor(np.clip(coord % 1.0, 0, 1) * (self.num_quant_bins - 1)))
-                + self.quant_offset
+                self._quantize_unit(coord % 1.0) + self.quant_offset
                 for coord in site.frac_coords
             ]
 
@@ -565,10 +603,7 @@ class CrystalTokenizer:
         lattice_params = reduced_structure.lattice.parameters
         for i, key in enumerate(self._lattice_param_keys):
             norm_val = self._normalize_lattice_param(lattice_params[i], key)
-            quant_val = int(
-                np.floor(np.clip(norm_val, 0, 1) * (self.num_quant_bins - 1))
-            )
-            tokens.append(quant_val + self.quant_offset)
+            tokens.append(self._quantize_unit(norm_val) + self.quant_offset)
 
         tokens.append(self._special_to_id["[EOS]"])
         return tokens
