@@ -404,6 +404,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--relax", default=True, action="store_true", help="Relax then generated materials"
     )
+    parser.add_argument(
+        "--no_relax",
+        action="store_true",
+        help="Skip MatterSim relaxation and only write generated structures. "
+        "Needed because --relax defaults to True and store_true cannot unset it.",
+    )
 
     parser.add_argument(
         "--density", nargs="+", default=None, help="Condition: Density of the Material"
@@ -491,7 +497,7 @@ if __name__ == "__main__":
     
     csp_oxi_mode = args.csp_oxi_mode
     print("Relaxing", args.relax)
-    RELAX_GENERATED_MATERIALS = args.relax
+    RELAX_GENERATED_MATERIALS = args.relax and not args.no_relax
     num_total_samples = args.num_samples
     all_generated = []
     invalid_structures = 0

@@ -197,3 +197,5 @@ llm_env/
 src/materium/data/
 src/materium/checkpoints/
 src/materium/qe_input/
+csp_materium/
+figures/
