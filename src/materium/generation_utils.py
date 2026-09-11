@@ -640,7 +640,12 @@ def generate_structure(
             # 2. DEFINE THE DYNAMIC FORBID MASK
             forbid_mask = None
             
-            if target_counts:
+            # The slot arithmetic below counts positions since [ATOMS], so it is
+            # only meaningful while we are still inside the atom section. Once
+            # [LATTICE] is emitted the remaining tokens are lattice parameters,
+            # which must stay unconstrained -- otherwise every 4th one would be
+            # mistaken for a species slot and its bin token forbidden.
+            if target_counts and lattice_tok not in generated:
                 # Detect if we are picking a species
                 atoms_section_start = generated.index(atoms_tok)
                 num_in_atoms = len(generated) - (atoms_section_start + 1)
@@ -698,13 +703,14 @@ def generate_structure(
                         forbid_mask[lattice_tok] = True
                         forbid_mask[eos] = True
 
-                    # ALWAYS ALLOW special tokens and quantized bins (x,y,z, lattice params)
-                    # This is necessary so the model can transition sections or pick coordinates
-                    for name, sid in tokenizer._special_to_id.items():
-                        # Only allow SOS/PAD/ATOMS here; LATTICE/EOS are handled above
-                        if name not in ["[LATTICE]", "[EOS]"]:
-                            forbid_mask[sid] = False
-                    forbid_mask[tokenizer.quant_offset:] = False
+                    # NOTE: nothing further is unmasked here. A species slot accepts
+                    # only a whitelisted species, or [LATTICE]/[EOS] once stoichiometry
+                    # is met. An earlier version re-allowed the quantized bins at this
+                    # point, which let the model emit a coordinate where an element
+                    # belongs; that shifts the 4-token atom blocks out of alignment and
+                    # makes detokenize raise KeyError(<bin id>) -- the
+                    # "Invalid structure <number>" failures. Coordinate slots are
+                    # unconstrained because forbid_mask stays None for them.
 
             samp_kwargs = dict(
                 temperature=temperature,
