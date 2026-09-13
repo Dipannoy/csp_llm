@@ -208,6 +208,7 @@ def run_generation(
     qe_save_folder: str,
     DEVICE: str = "cpu",
     csp_oxi_mode: str = None,
+    constrain_formula: bool = True,
 ):
     save_struct_path = os.path.join(
         ckpt_path,
@@ -238,6 +239,7 @@ def run_generation(
                 conditions=conditions,
                 classifier_guidance_weight=2.5,
                 csp_oxi_mode = csp_oxi_mode,
+                constrain_formula=constrain_formula,
             )
             generated_material: Structure = tokenizer.detokenize(generated_tokens)
             
@@ -405,6 +407,15 @@ if __name__ == "__main__":
         "--relax", default=True, action="store_true", help="Relax then generated materials"
     )
     parser.add_argument(
+        "--formula_mode",
+        type=str,
+        default="strict",
+        choices=["strict", "free"],
+        help="strict: generate only the exact given formula (stoichiometry-constrained "
+        "sampling). free: unconstrained sampling, so the model may produce any "
+        "composition -- the original default behaviour.",
+    )
+    parser.add_argument(
         "--no_relax",
         action="store_true",
         help="Skip MatterSim relaxation and only write generated structures. "
@@ -498,6 +509,8 @@ if __name__ == "__main__":
     csp_oxi_mode = args.csp_oxi_mode
     print("Relaxing", args.relax)
     RELAX_GENERATED_MATERIALS = args.relax and not args.no_relax
+    constrain_formula = args.formula_mode == "strict"
+    print(f"Formula mode: {args.formula_mode} (constrain_formula={constrain_formula})")
     num_total_samples = args.num_samples
     all_generated = []
     invalid_structures = 0
@@ -543,7 +556,8 @@ if __name__ == "__main__":
             multi_eval_tracker,
             qe_save_folder,
             DEVICE=DEVICE,
-            csp_oxi_mode = csp_oxi_mode
+            csp_oxi_mode = csp_oxi_mode,
+            constrain_formula=constrain_formula,
         )
 
         if RELAX_GENERATED_MATERIALS:

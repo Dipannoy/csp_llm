@@ -550,6 +550,7 @@ def generate_structure(
     use_typical: bool = False,
     oxygen_penalty: float = 0.0,
     charge_neutral_bias: float = 0.0,
+    constrain_formula: bool = True,
 ):
     model.eval()
     sos = tokenizer._special_to_id["[SOS]"]
@@ -563,7 +564,10 @@ def generate_structure(
     allowed_species_ids = None
 
     # 1. SETUP STOICHIOMETRY CONSTRAINTS
-    if conditions and "reduced_formula" in conditions:
+    # constrain_formula=False reproduces the original unconstrained sampler:
+    # target_counts stays empty, so the forbid mask below never fires and the
+    # model is free to emit any composition rather than exactly this formula.
+    if conditions and "reduced_formula" in conditions and constrain_formula:
         formula = conditions["reduced_formula"]
         
         # We use the literal composition from the formula provided by the user
