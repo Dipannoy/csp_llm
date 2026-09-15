@@ -619,6 +619,23 @@ def generate_structure(
                 print(f"Warning: BERTOS filtering setup failed: {e}. Falling back to stoichiometry-only.")
                 allowed_species_ids = None  # stoichiometry-only mode
 
+    # A structure needs 4N + 10 tokens: [SOS], [ATOMS], four per atom,
+    # [LATTICE], six lattice parameters, [EOS]. The default max_len of 100 caps
+    # this at 22 atoms, and anything larger stops before emitting [LATTICE] --
+    # detokenize then fails with "Found 0 lattice parameters, expected 6" on
+    # every attempt. Size the budget from the formula instead of a fixed cliff.
+    if total_target_atoms:
+        required_len = 4 * total_target_atoms + 12  # +2 slack over 4N + 10
+        if required_len > max_len:
+            print(f"Raising max_len {max_len} -> {required_len} for "
+                  f"{total_target_atoms} atoms")
+            max_len = required_len
+        model_limit = getattr(model.params, "max_seq_len", None)
+        if model_limit is not None and max_len > model_limit:
+            print(f"Warning: {total_target_atoms} atoms needs {required_len} tokens "
+                  f"but the model's max_seq_len is {model_limit}; generation will "
+                  f"be truncated and detokenize will fail.")
+
     generated = [sos, atoms_tok]
 
     if conditions is not None:
