@@ -636,7 +636,18 @@ class CrystalTokenizer:
                 if param_idx >= 6:
                     continue
                 param_key = self._lattice_param_keys[param_idx]
-                norm_val = (token - self.quant_offset + 0.5) / self.num_quant_bins
+                # A token outside the bin range is not a lattice value. Decoding it
+                # anyway makes (token - quant_offset) negative, which denormalizes to
+                # below min_val -- a 0.25 A cell edge, or even a negative one. Reject
+                # it here rather than emit a structure that is silently unphysical.
+                bin_idx = token - self.quant_offset
+                if not 0 <= bin_idx < self.num_quant_bins:
+                    raise ValueError(
+                        f"Invalid token sequence: lattice parameter '{param_key}' got "
+                        f"token {token}, which is not a quantization bin "
+                        f"[{self.quant_offset}, {self.quant_offset + self.num_quant_bins})."
+                    )
+                norm_val = (bin_idx + 0.5) / self.num_quant_bins
                 denorm_val = self._denormalize_lattice_param(norm_val, param_key)
                 lattice_params.append(denorm_val)
 

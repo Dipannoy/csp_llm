@@ -661,12 +661,27 @@ def generate_structure(
             # 2. DEFINE THE DYNAMIC FORBID MASK
             forbid_mask = None
             
+            # The six lattice parameters are quantized bins, and the sequence ends
+            # immediately after them, so nothing else is legal in that section.
+            # Leaving it unconstrained let a species/special token land in a
+            # parameter slot, where detokenize turns a negative
+            # (token - quant_offset) into a sub-minimum edge length -- e.g.
+            # b = 0.25 A, a collapsed cell that no relaxer can recover.
+            if lattice_tok in generated:
+                n_lattice = len(generated) - 1 - generated.index(lattice_tok)
+                forbid_mask = torch.ones(tokenizer.vocab_size, dtype=torch.bool, device=device)
+                if n_lattice < 6:
+                    forbid_mask[
+                        tokenizer.quant_offset:
+                        tokenizer.quant_offset + tokenizer.num_quant_bins
+                    ] = False
+                else:
+                    forbid_mask[eos] = False
+
             # The slot arithmetic below counts positions since [ATOMS], so it is
-            # only meaningful while we are still inside the atom section. Once
-            # [LATTICE] is emitted the remaining tokens are lattice parameters,
-            # which must stay unconstrained -- otherwise every 4th one would be
-            # mistaken for a species slot and its bin token forbidden.
-            if target_counts and lattice_tok not in generated:
+            # only meaningful while we are still inside the atom section; the
+            # branch above already handles everything from [LATTICE] onwards.
+            elif target_counts:
                 # Detect if we are picking a species
                 atoms_section_start = generated.index(atoms_tok)
                 num_in_atoms = len(generated) - (atoms_section_start + 1)
@@ -687,9 +702,12 @@ def generate_structure(
                     
                     if current_total_atoms >= total_target_atoms:
                         # STOICHIOMETRY MET: Do NOT allow any more species IDs.
-                        # Force the model to move to LATTICE or EOS section
+                        # [LATTICE] is mandatory here. Allowing [EOS] too let the
+                        # model stop before emitting any cell, which detokenize
+                        # rejects with "Found 0 lattice parameters, expected 6" --
+                        # 611 of 9000 samples were lost that way across 70 formulas.
                         forbid_mask[lattice_tok] = False
-                        forbid_mask[eos] = False
+                        forbid_mask[eos] = True
                     else:
                         # STOICHIOMETRY NOT MET: Determine which species are still needed
                         legal_now = []
@@ -725,13 +743,25 @@ def generate_structure(
                         forbid_mask[eos] = True
 
                     # NOTE: nothing further is unmasked here. A species slot accepts
-                    # only a whitelisted species, or [LATTICE]/[EOS] once stoichiometry
+                    # only a whitelisted species, or [LATTICE] once stoichiometry
                     # is met. An earlier version re-allowed the quantized bins at this
                     # point, which let the model emit a coordinate where an element
                     # belongs; that shifts the 4-token atom blocks out of alignment and
                     # makes detokenize raise KeyError(<bin id>) -- the
-                    # "Invalid structure <number>" failures. Coordinate slots are
-                    # unconstrained because forbid_mask stays None for them.
+                    # "Invalid structure <number>" failures.
+                else:
+                    # COORDINATE SLOT: the three tokens after a species are fractional
+                    # coordinates, so only quantized bins belong here. Leaving these
+                    # open let [EOS] end the sequence mid-atom, which detokenize
+                    # rejects ("Mismatch between species and coordinates"), and let a
+                    # species token shift the 4-token blocks out of alignment.
+                    # Only applied when target_counts is known, so unconstrained
+                    # (free-formula) generation keeps its original behaviour.
+                    forbid_mask = torch.ones(tokenizer.vocab_size, dtype=torch.bool, device=device)
+                    forbid_mask[
+                        tokenizer.quant_offset:
+                        tokenizer.quant_offset + tokenizer.num_quant_bins
+                    ] = False
 
             samp_kwargs = dict(
                 temperature=temperature,
