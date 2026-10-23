@@ -57,15 +57,36 @@ from materium.tokenizer import CrystalTokenizer, SequenceOrder, SortingOrder
 
 # --------------------------------------------------------------------- loading
 
-def load_tokenizer(ckpt_path):
+def resolve_checkpoint(ckpt):
+    """Accept either a usable path or the <dir>/<file> form llm_generate.py uses.
+
+    llm_generate.py resolves checkpoints against src/materium/checkpoints/ rather
+    than the working directory, so the same string that works for generation is
+    not a valid path from the repo root. Try it as given first, then there.
+    """
+    candidates = [ckpt, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "checkpoints", ckpt)]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    raise SystemExit(
+        "Checkpoint not found. Tried:\n"
+        + "".join("  %s\n" % c for c in candidates)
+        + "Pass either a full path, or the <ckpt_dir>/<ckpt_file> that\n"
+          "llm_generate.py takes (resolved under src/materium/checkpoints/)."
+    )
+
+
+def load_tokenizer(ckpt):
     """Recover the tokenizer a checkpoint was trained with.
 
     Mirrors llm_generate.py: the config travels inside the checkpoint, and only
     a checkpoint written before that was stored falls back to defaults.
     """
-    if ckpt_path:
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        cfg = ckpt.get("tokenizer")
+    if ckpt:
+        ckpt_path = resolve_checkpoint(ckpt)
+        state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        cfg = state.get("tokenizer")
         if cfg is not None:
             print("tokenizer: loaded from %s" % ckpt_path)
             return CrystalTokenizer.from_dict(cfg)
