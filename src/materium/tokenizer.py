@@ -379,6 +379,18 @@ class CrystalTokenizer:
 
         return cls(**json_data)
 
+    # Which sorting orders are species-primary with fractional coordinates as the
+    # tie-break, and whether those coordinates run descending. Translation
+    # augmentation needs this to reproduce the site order `tokenize` would emit
+    # after an origin shift. Orders absent from this map are not species-primary
+    # (XYZ sorts on coordinates first; RANDOM has no order to preserve), so no
+    # within-species re-sort applies to them.
+    _COORD_TIEBREAK_DESCENDING = {
+        SortingOrder.SPECIES: False,
+        SortingOrder.REVERSE_SPECIES: True,       # ascending key, then [::-1]
+        SortingOrder.ELECTRON_NEG_DOWN: False,
+    }
+
     def token_layout(self) -> "TokenLayout":
         """Describe the token stream so the loss can recover position roles."""
         return TokenLayout(
@@ -389,6 +401,9 @@ class CrystalTokenizer:
             num_quant_bins=self.num_quant_bins,
             block_size=4,
             coords_first=self.sequence_order == SequenceOrder.COORDS_FIRST,
+            coord_tiebreak_descending=self._COORD_TIEBREAK_DESCENDING.get(
+                self.sorting_order
+            ),
         )
 
     def _quantize_unit(self, value: float) -> int:

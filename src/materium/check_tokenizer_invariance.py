@@ -51,7 +51,12 @@ import numpy as np
 import torch
 from pymatgen.core import Lattice, Structure
 
-from materium.coord_loss import TokenLayout, build_token_roles
+from materium.coord_loss import (
+    ROLE_COORD,
+    TokenLayout,
+    build_token_roles,
+    resort_atom_blocks,
+)
 from materium.tokenizer import CrystalTokenizer, SequenceOrder, SortingOrder
 
 
@@ -151,13 +156,13 @@ def shift_coord_bins(tokens, layout, shifts):
 
     This is apply_translation_augmentation with the random draw replaced by a
     fixed `shifts`, so the comparison in check 4 is against a specific origin
-    shift rather than an arbitrary one. Role and axis derivation is the real
-    build_token_roles, which is the part under test.
+    shift rather than an arbitrary one. Everything else -- role and axis
+    derivation via build_token_roles, and the re-sort via resort_atom_blocks --
+    is the production code, which is what check 4 is testing.
     """
     tokens = torch.as_tensor(tokens, dtype=torch.long).unsqueeze(0)
     roles, coord_axis = build_token_roles(tokens, layout)
 
-    from materium.coord_loss import ROLE_COORD
     is_coord = roles == ROLE_COORD
     axis = coord_axis.clamp_min(0)
 
@@ -165,7 +170,8 @@ def shift_coord_bins(tokens, layout, shifts):
     bins = tokens - layout.quant_offset
     shifted = (bins + per_token_shift) % layout.num_quant_bins + layout.quant_offset
 
-    return torch.where(is_coord, shifted, tokens).squeeze(0).tolist()
+    shifted_tokens = torch.where(is_coord, shifted, tokens)
+    return resort_atom_blocks(shifted_tokens, roles, layout).squeeze(0).tolist()
 
 
 # -------------------------------------------------------------------- the checks

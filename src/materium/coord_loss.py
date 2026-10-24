@@ -45,6 +45,13 @@ class TokenLayout:
     block_size: int = 4
     coords_first: bool = False
 
+    # How the tokenizer orders sites, which translation augmentation has to
+    # reproduce. False/True mean the ordering is species-primary with fractional
+    # coordinates as the tie-break, running ascending/descending respectively.
+    # None means it is not species-primary (XYZ, RANDOM), where re-sorting
+    # within a species run is not the right operation.
+    coord_tiebreak_descending: Optional[bool] = None
+
 
 @dataclass
 class CoordLossConfig:
@@ -162,6 +169,76 @@ def soft_target_entropy(kernel: torch.Tensor) -> float:
     return float(-(p * p.clamp_min(1e-12).log()).sum())
 
 
+def resort_atom_blocks(
+    tokens: torch.Tensor, roles: torch.Tensor, layout: TokenLayout
+) -> torch.Tensor:
+    """Restore the tokenizer's site ordering after coordinate bins have moved.
+
+    ``tokenize`` sorts sites by species and then breaks ties on the fractional
+    coordinates, so shifting the origin re-orders the atoms that share a species.
+    Shifting bins alone therefore produces a sequence that describes the right
+    crystal in an order the tokenizer would never emit, and since a shift is
+    drawn for every structure in every batch, the model is left never seeing the
+    ordering convention it is supposed to rely on.  This sorts the four-token
+    atom blocks within each species run so the result matches ``tokenize``.
+
+    Species tokens are unaffected by a translation, so each species run stays
+    contiguous and only its interior needs reordering.
+
+    One residual difference from ``tokenize`` is unavoidable here: it sorts on
+    the float coordinates before quantising, so two sites that land in the same
+    bin but differ as floats have an order that the bins no longer carry.
+    """
+    if layout.coord_tiebreak_descending is None:
+        return tokens
+
+    descending = layout.coord_tiebreak_descending
+    block = layout.block_size
+    species_idx = block - 1 if layout.coords_first else 0
+    coord_idx = (
+        tuple(range(block - 1)) if layout.coords_first else tuple(range(1, block))
+    )
+
+    out = tokens.clone()
+    seqlen = tokens.shape[1]
+    species_positions = (roles == ROLE_SPECIES).nonzero()
+
+    for b in range(tokens.shape[0]):
+        positions = species_positions[species_positions[:, 0] == b, 1].tolist()
+        if len(positions) < 2:
+            continue
+
+        row = out[b].tolist()
+        starts = [p - (block - 1) if layout.coords_first else p for p in positions]
+        # Drop any block the sequence does not fully contain, rather than
+        # reordering past the end of a truncated atom section.
+        starts = [s for s in starts if s >= 0 and s + block <= seqlen]
+        if len(starts) < 2:
+            continue
+
+        blocks = [row[s : s + block] for s in starts]
+
+        i = 0
+        while i < len(blocks):
+            j = i
+            species = blocks[i][species_idx]
+            while j < len(blocks) and blocks[j][species_idx] == species:
+                j += 1
+            if j - i > 1:
+                blocks[i:j] = sorted(
+                    blocks[i:j],
+                    key=lambda blk: tuple(blk[k] for k in coord_idx),
+                    reverse=descending,
+                )
+            i = j
+
+        for s, blk in zip(starts, blocks):
+            row[s : s + block] = blk
+        out[b] = torch.tensor(row, dtype=tokens.dtype, device=tokens.device)
+
+    return out
+
+
 def apply_translation_augmentation(
     tokens: torch.Tensor,
     roles: torch.Tensor,
@@ -181,6 +258,11 @@ def apply_translation_augmentation(
 
     Only coordinate tokens move.  Lattice parameters are not translationally
     related and are left untouched.
+
+    The shifted blocks are then re-sorted, because the tokenizer's site order
+    depends on the coordinates it is sorting; without that step the augmented
+    sequence is in an order ``tokenize`` would never produce.  See
+    ``resort_atom_blocks``.
     """
     bsz = tokens.shape[0]
     shifts = torch.randint(
@@ -198,7 +280,8 @@ def apply_translation_augmentation(
     bins = tokens - layout.quant_offset
     shifted = (bins + per_token_shift) % layout.num_quant_bins + layout.quant_offset
 
-    return torch.where(roles == ROLE_COORD, shifted, tokens)
+    shifted_tokens = torch.where(roles == ROLE_COORD, shifted, tokens)
+    return resort_atom_blocks(shifted_tokens, roles, layout)
 
 
 def _masked_mean(
