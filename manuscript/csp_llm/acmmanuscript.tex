@@ -138,6 +138,127 @@ hard as predicting bin 800. Second, it does not know the cell repeats, so bins
 1023 and 0 are treated as far apart even though they describe neighbouring
 positions. Both observations motivated the loss work reported here.
 
+\subsection{Changes made to the released model}
+\label{sec:catalogue}
+
+Eleven changes were made to the released code. They fall into four kinds:
+changes to the training \emph{objective}, changes to the model
+\emph{architecture}, changes to the \emph{representation} the model reads and
+writes, and changes to the \emph{decoding} procedure that turns a trained model
+into structures. Table~\ref{tab:catalogue} lists them with their present
+standing, and the paragraphs below explain each one.
+
+\begin{table}[h]
+  \caption{Every change made to the released model, with its present standing.
+  \emph{Kept} means it is active in all current runs; \emph{harmful} and
+  \emph{inert} are measured verdicts explained in
+  Section~\ref{sec:verdict}.}
+  \label{tab:catalogue}
+  \begin{footnotesize}
+  \begin{tabular}{llp{2.45cm}}
+    \toprule
+    Change & Kind & Standing \\
+    \midrule
+    Circular soft-target loss      & objective     & harmful \\
+    Hard/soft target mixing        & objective     & under evaluation \\
+    Per-role loss normalisation    & objective     & kept (soft runs) \\
+    Auxiliary space-group head     & architecture  & inert \\
+    Corrected bin grid             & representation & kept \\
+    Lattice-token validation       & representation & kept \\
+    Oxidation states from TOSS     & representation & under evaluation \\
+    Mandatory cell emission        & decoding      & kept \\
+    Bin-only coordinate slots      & decoding      & kept \\
+    Sequence-length auto-sizing    & decoding      & kept \\
+    Translation augmentation       & training      & disabled \\
+    \bottomrule
+  \end{tabular}
+  \end{footnotesize}
+\end{table}
+
+\paragraph{Circular soft-target loss (objective).}
+The released model demands one exact bin per coordinate. We replace that target
+with a wrapped Gaussian: probability mass $\propto \exp(-d^{2}/2\sigma^{2})$,
+where $d(i,j) = \min(|i-j|,\, B-|i-j|)$ is the \emph{circular} distance between
+bins. Two defects of the original are addressed at once. A near miss becomes
+cheap, and bins $0$ and $1023$ become adjacent, which they physically are. The
+loss is applied only to coordinate positions; species, lattice and special
+tokens keep ordinary cross-entropy. One consequence must be kept in mind when
+reading validation numbers: a soft target has irreducible entropy, so a perfect
+model converges to that entropy rather than to zero. At $\sigma = 2$ the floor
+is $2.112$ nats and at $\sigma = 64$ it is $5.578$ nats, against $0$ for a
+one-hot target. Validation losses are therefore \emph{not} comparable across
+objectives without subtracting the floor.
+
+\paragraph{Hard/soft target mixing (objective).}
+A single parameter interpolates between the soft target and the original one-hot
+target, $\mathcal{L} = (1-m)\mathcal{L}_{\mathrm{soft}} +
+m\mathcal{L}_{\mathrm{hard}}$. At $m = 1$ the original objective is recovered
+exactly. The intent is to keep the geometric gradient without fully discarding
+the demand for an exact bin.
+
+\paragraph{Per-role loss normalisation (objective).}
+Every token is labelled with its role --- coordinate, species, lattice or
+special --- and the coordinate and non-coordinate terms are averaged over their
+own token counts before being added, rather than pooled into one mean over all
+positions. Without this the relative weight of the two terms drifts with the
+number of atoms in a structure, so a cell with forty atoms would weight
+coordinates differently from one with four.
+
+\paragraph{Auxiliary space-group head (architecture).}
+The one architectural change: a linear classifier over 231 classes is attached
+to the mean-pooled hidden states and trained jointly with the token objective.
+The intent is to force symmetry into the internal representation rather than
+hoping it emerges from coordinate accuracy, since space group is the metric on
+which the model performs worst. The head is active only on batches where the
+space group was withheld from the conditioning input, so that it cannot read its
+own answer off its input.
+
+\paragraph{Corrected bin grid (representation).}
+The released code converts a coordinate to a bin by multiplying by $1023$ and
+converts back by dividing by $1024$, placing the value at the bin centre. The
+two grids disagree, so writing a structure and reading it back does not return
+it: the round-trip error reaches $1.50$ bin widths. With the same spacing in
+both directions the error falls to $0.50$ bin widths, which is the irreducible
+cost of quantisation itself. This is a correctness fix rather than a modelling
+choice, and it is active in every run reported here.
+
+\paragraph{Lattice-token validation (representation).}
+Decoding accepted any token in a lattice slot and silently converted it into a
+cell parameter, so a species token appearing there produced an arbitrary number.
+Out-of-range tokens now raise instead.
+
+\paragraph{Oxidation states from TOSS (representation).}
+Each atom token carries an oxidation state alongside its element. The released
+model infers these by composition-based guessing; we train one model on states
+assigned by TOSS and let BERTOS supply them at generation time, so that the
+state attached to each atom reflects a bonding model rather than a heuristic.
+
+\paragraph{Mandatory cell emission (decoding).}
+Once the requested stoichiometry was satisfied, the released sampler allowed
+either the cell marker or the end-of-sequence token. Choosing the latter
+produced a structure with atoms and no unit cell, which is not a structure.
+Emitting the cell is now mandatory at that position.
+
+\paragraph{Bin-only coordinate slots (decoding).}
+Coordinate and lattice positions were sampled over the entire vocabulary, so a
+species token could be drawn where a number belonged and decode into an
+unphysical cell --- a $0.25$\,\AA\ edge was observed. Those positions are now
+restricted to bin tokens, and after the sixth lattice parameter only
+end-of-sequence is legal.
+
+\paragraph{Sequence-length auto-sizing (decoding).}
+The generation length was a fixed constant, so a structure needing more tokens
+than the limit was truncated mid-cell. The budget is now derived from the
+requested atom count, $4N + 12$.
+
+\paragraph{Translation augmentation (training).}
+Shifting every coordinate by one random offset describes the same crystal, which
+makes it a natural augmentation, and it is applied in token space as
+$\mathrm{bin} \mapsto (\mathrm{bin}+k) \bmod B$. It reproduced the token
+sequence the tokenizer emits for a genuinely shifted structure only $31\%$ of
+the time, so it was training the model on sequences the tokenizer would never
+produce. It is disabled in every run reported here.
+
 \subsection{What changed in each run}
 \label{sec:changes}
 
@@ -165,31 +286,8 @@ Section~\ref{sec:completed} a controlled one.
   \end{footnotesize}
 \end{table}
 
-In plain terms:
-
-\paragraph{Loss: flat versus soft.}
-\emph{Flat} is the original cross-entropy. \emph{Soft} spreads the training
-target over neighbouring bins instead of demanding one exact bin, and treats bin
-1023 and bin 0 as adjacent. A near miss is therefore rewarded, and the
-periodicity of the cell is respected.
-
-\paragraph{Bin grid.}
-The original code converted a coordinate to a bin by multiplying by 1023 but
-converted back by dividing by 1024. Encoding and decoding sat on grids offset by
-about one and a half bin widths, so a structure could not be written and read
-back unchanged. The corrected grid uses the same spacing in both directions,
-and all three runs below use it. This is a correctness fix, not a modelling
-choice, and it is the one respect in which these runs differ from the released
-code regardless of their objective.
-
-\paragraph{Augmentation.}
-Where a crystal's origin sits is arbitrary: sliding every atom by the same
-amount describes the same material. Augmentation exploits that by shifting all
-coordinates by a random amount each time a structure is shown to the model, so
-it sees many equivalent versions. We later found this was implemented
-incorrectly --- it reproduced the ordering the tokenizer would emit for a
-shifted structure only $31\%$ of the time --- and disabled it for every later
-run.
+Section~\ref{sec:catalogue} explains each of these changes; only the
+objective differs between the three.
 
 \subsection{Completed results}
 \label{sec:completed}
@@ -258,6 +356,63 @@ to fewer than two structures and should not be read as effects. Nothing here
 separates the choice of objective from the choice of \emph{representation}: all
 three runs predict independent per-coordinate bins, and that is the shared
 assumption the space-group gap most likely indicts.
+
+\subsection{Which change helped most, and which hurt most}
+\label{sec:verdict}
+
+\paragraph{The most valuable change: constrained decoding and the corrected
+grid.}
+These are the changes that decide whether the model emits a structure at all,
+and they are the only ones whose effect is unambiguously positive. Before them,
+$611$ of $9{,}000$ sampled structures across $70$ formulas terminated with atoms
+and no unit cell and were simply lost; some formulas returned one usable
+candidate out of fifty, and a collapsed cell produced by an unconstrained
+lattice slot could consume enough memory during relaxation to destroy an entire
+batch of work. After them a formula returns a full set of candidates, and the
+representation round-trips to within the quantisation limit instead of $1.5$
+bins. Two caveats are owed to the reader. First, this is measured as candidate
+yield rather than as a controlled difference in match rate, because the defects
+were corrected rather than ablated. Second, none of it is a modelling
+contribution: it is the repair needed before any objective can be evaluated
+fairly, and its real importance is that every number in
+Table~\ref{tab:completed} would otherwise have been depressed by an
+implementation fault rather than by the hypothesis under test.
+
+\paragraph{The most damaging change: widening the soft kernel.}
+The wide kernel is the clearest negative result. At $\sigma = 64$ the
+space-group rate at top-25 falls to $40.0$ from $51.7$ under the original
+objective, a loss of $11.7$ points, and consensus falls by $11.1$, while
+structure moves by only $2.2$. The narrow kernel at $\sigma = 2$ sits between
+them on every metric. The ordering is monotone in $\sigma$, so this is a
+property of the objective rather than an unlucky choice of width.
+
+Subtracting each objective's entropy floor makes the failure sharper. The
+excess over floor --- the part a better model could still remove --- is $1.806$
+nats for the original objective, $2.389$ for $\sigma = 2$ and $1.399$ for
+$\sigma = 64$. The wide-kernel model is thus the \emph{closest} of the three to
+optimal under the loss it was trained on, and the worst of the three at the
+task. Optimising the soft objective more successfully does not produce better
+crystals, which is the strongest available evidence that this objective is
+misaligned with the metric rather than merely under-trained.
+
+\paragraph{The least useful change: the auxiliary space-group head.}
+Distinct from the above in that it does no harm and no good. The head reaches
+$100.0\%$ validation accuracy with its loss decaying to $6\times10^{-4}$, so
+after roughly thirty epochs it contributes almost no gradient. The cause is that
+it pools over the whole teacher-forced sequence, and so is handed every
+coordinate and the complete cell before being asked for the space group --- which
+is precisely what a symmetry-detection routine computes from exactly that input.
+The task as posed is recognition of a fully observed structure, not prediction,
+and it is solved almost immediately. Making it informative requires pooling over
+a prefix, so that symmetry must be anticipated from an incomplete structure
+rather than read off a complete one. That has not been implemented.
+
+\paragraph{Summary.}
+Nothing changed about the training objective has improved the benchmark. The
+measurable gains come from correctness work on the representation and the
+decoder; the measurable losses come from softening the coordinate target. The
+one architectural change is inert as currently posed. Section~\ref{sec:status}
+lists what this suggests should be attempted next.
 
 \section{Status and open items}
 \label{sec:status}
