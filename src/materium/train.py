@@ -118,6 +118,11 @@ def run_epoch(
             input_seq = batch["tokens"].to(device)
             target_seq = batch["targets"].to(device)
             conditions = batch["conditions"]
+            # Snapshot before the dropout below: `conditions` aliases
+            # batch["conditions"], so deleting a key there removes it from both
+            # and the auxiliary targets would vanish with it.
+            _sg_raw = conditions.get("space_group")
+            _sg_raw_mask = conditions.get("space_group_mask")
             condition_keys = list(
                 [k for k in conditions.keys() if not k.endswith("_mask")]
             )
@@ -134,10 +139,22 @@ def run_epoch(
             if target_roles is not None:
                 target_roles = target_roles.to(device)
 
+            # Supplied only when space_group is NOT among the conditions this
+            # batch kept. With the condition present the head could read its
+            # answer off its own input, so the aux term would be free and
+            # teach the representation nothing.
+            sg_targets = sg_mask = None
+            if "space_group" not in conditions and _sg_raw is not None:
+                sg_targets = _sg_raw.reshape(-1).long().to(device)
+                if _sg_raw_mask is not None:
+                    sg_mask = _sg_raw_mask.reshape(-1).bool().to(device)
+
             logits = model(
                 input_seq,
                 targets=target_seq,
                 conditions=conditions,
+                sg_targets=sg_targets,
+                sg_mask=sg_mask,
                 target_roles=target_roles,
             )
             loss = model.last_loss
@@ -364,7 +381,7 @@ def load_model(args):
 
     ckpt_path = os.path.join(os.path.dirname(__file__), "checkpoints", args.check_dir)
     model, ckpt = LLamaTransformer.load(
-        os.path.join(ckpt_path, args.ckpt_file), strict=False
+        os.path.join(ckpt_path, args.check_file), strict=False
     )
 
     # ckpt_path = os.path.join(os.path.dirname(__file__), "checkpoints", "llm_v2_material_llama_adamw_condition_latticelast_dim384")
@@ -496,6 +513,15 @@ if __name__ == "__main__":
         "--legacy_bin_grid",
         action="store_true",
         help="Keep the old encode grid so an existing token cache stays valid (skips re-tokenization).",
+    )
+    parser.add_argument(
+        "--sg_aux_weight",
+        type=float,
+        default=0.0,
+        help="Weight of the auxiliary space-group prediction loss. 0 disables the "
+             "head entirely. Only applied on batches where the space_group "
+             "condition was dropped, since otherwise the head would read its "
+             "target from its own input.",
     )
     parser.add_argument(
         "--legacy_loss",
@@ -688,6 +714,7 @@ if __name__ == "__main__":
             loss_weights=None,
             token_layout=token_layout,
             coord_loss_config=coord_loss_config,
+            sg_aux_weight=args.sg_aux_weight,
         ).to(DEVICE)
         ckpt_path = os.path.join(
             os.path.dirname(__file__),
