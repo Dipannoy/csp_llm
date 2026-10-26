@@ -1,0 +1,293 @@
+%% Crystal structure prediction with a geometry-aware coordinate loss.
+%%
+%% WORKING DOCUMENT. At this stage it records measured results only; the
+%% introduction, related work, method and discussion are deliberately absent.
+%% Numbers here are copied from topn_summary_<TAG>.csv and nothing else.
+
+\documentclass[manuscript,screen,review]{acmart}
+
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+
+%% Suppressed while this is an internal record rather than a submission.
+\settopmatter{printacmref=false}
+\setcopyright{none}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+\begin{document}
+
+\title{A Periodicity-Aware Coordinate Loss for Autoregressive Crystal
+Structure Prediction}
+
+%% TODO: author name and affiliation.
+\author{Anonymous}
+\affiliation{%
+  \institution{University of South Carolina}
+  \city{Columbia}
+  \state{South Carolina}
+  \country{USA}}
+\email{dg47@email.sc.edu}
+
+\renewcommand{\shortauthors}{Working draft}
+
+\begin{abstract}
+  Autoregressive crystal generators discretize fractional coordinates into
+  bins and train with cross-entropy over those bins. That objective is
+  geometrically blind: it penalizes a one-bin error as heavily as a half-cell
+  error, and it treats the adjacent coordinates $0.99$ and $0.01$ as maximally
+  distant. We replace it with a circular soft-target loss, in which probability
+  mass is distributed over neighbouring bins under a wrapped Gaussian whose
+  distance metric respects the periodicity of the unit cell. Evaluating on a
+  180-structure crystal structure prediction benchmark, against training data
+  held disjoint from it, we find that the modified objective does not improve on
+  plain cross-entropy: at kernel widths of 2 and 64 bins it is equal or worse on
+  structure match and substantially worse on space-group match, and the penalty
+  grows with the width of the kernel rather than appearing at one particular
+  scale. We attribute this to soft targets blurring each coordinate
+  independently, where symmetry depends on exact relations between coordinates,
+  and conclude that the per-coordinate factorization of the output, rather than
+  the shape of the target placed on it, is what limits symmetry recovery.
+\end{abstract}
+
+\keywords{crystal structure prediction, autoregressive models, discretized
+coordinates, periodic loss functions}
+
+\maketitle
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Experimental setup}
+\label{sec:setup}
+
+Every model here is a LLaMA-style autoregressive transformer
+(512-dimensional, $4.3\times10^{7}$ parameters) over crystal token sequences of
+the form \texttt{[SOS] [ATOMS] (element$\vert$ox, $x$, $y$, $z$)$^{N}$}
+\texttt{[LATTICE] ($a,b,c,\alpha,\beta,\gamma$) [EOS]}, with fractional
+coordinates and lattice parameters quantized to 1024 bins. Oxidation states are
+assigned by composition-based guessing. Training runs for 500 epochs, and the
+checkpoint with the lowest validation loss is the one evaluated.
+Section~\ref{sec:changes} states what distinguishes the individual runs.
+
+All runs train on the same split of MP-20: 27{,}023 training, 9{,}001
+validation and 9{,}009 test structures, held disjoint from the benchmark by
+excluding every structure whose reduced composition matches one of the 180
+benchmark formulas. Matching on the \emph{reduced} composition makes
+Zn$_4$S$_4$O$_{16}$, ZnSO$_4$ and a $2\times$ supercell collide, as it should,
+since the task supplies a formula and asks for a structure. Every rate reported
+below is therefore an out-of-sample measurement.
+
+Evaluation uses the 180 benchmark structures. For each formula, 50 structures are
+generated with the composition constrained to the requested formula, relaxed
+with MatRIS (\texttt{matris\_10m\_oam}, FIRE, \texttt{FrechetCellFilter}, at
+most 200 steps, $f_{\max} = 0.05$\,eV/\AA), and ranked by formation energy per
+atom. Match rate at top-$N$ scores only the $N$ lowest-energy candidates.
+Structure match uses \texttt{StructureMatcher} with
+$\mathrm{ltol} = 0.2$, $\mathrm{stol} = 0.3$ and $\mathrm{angle\_tol} = 5$;
+space groups are assigned with $\mathrm{symprec} = 0.1$. Consensus requires a
+single candidate to match both structure and space group. All rates are over
+the full set of 180 formulas: a formula that produced no valid structure is
+counted as a failure rather than excluded.
+
+\subsection{The original setup, before any changes}
+\label{sec:original}
+
+The starting point was the Materium code as released. It treats a crystal as a
+sentence. Each atom contributes four tokens --- which element it is, and its
+three fractional coordinates --- and the unit cell contributes six more at the
+end. Fractional coordinates are not stored as numbers but rounded into one of
+1024 equally spaced bins, so a coordinate of $0.2504$ becomes "bin 256". The
+model is an ordinary autoregressive transformer: it reads the tokens produced so
+far and predicts the next one, and it is trained with plain cross-entropy, the
+same objective used for predicting the next word in a sentence.
+
+Figure~\ref{fig:pipeline} shows how a prediction is produced and scored. Nothing
+in that path was changed by us except where Section~\ref{sec:changes} says so.
+
+\begin{figure}[h]
+\begin{footnotesize}
+\begin{verbatim}
+  formula  e.g. Zn4S4O16
+     |
+     v
+  GENERATE   transformer emits tokens left to right
+     |       50 candidates per formula
+     |       composition is held fixed during sampling
+     v
+  RELAX      MatRIS, 200 steps, machine-learned forces
+     |       gives each candidate a formation energy
+     v
+  RANK       sort by energy, keep the best N
+     |
+     v
+  MATCH      compare against the known structure
+             pymatgen StructureMatcher
+             report: structure / space group / both
+\end{verbatim}
+\end{footnotesize}
+\caption{One formula in, a ranked list of structures out. Match rate at top-$N$
+scores only the $N$ lowest-energy candidates.}
+\label{fig:pipeline}
+\end{figure}
+
+Two properties of that original objective matter. First, it is blind to
+geometry: predicting bin 257 when the answer is bin 256 is punished exactly as
+hard as predicting bin 800. Second, it does not know the cell repeats, so bins
+1023 and 0 are treated as far apart even though they describe neighbouring
+positions. Both observations motivated the loss work reported here.
+
+\subsection{What changed in each run}
+\label{sec:changes}
+
+The three completed runs share their training data, their bin grid, their
+oxidation handling and their epoch budget, and none of them uses augmentation or
+an auxiliary output. They differ in the training objective alone, which is what
+makes Table~\ref{tab:changes} short and the comparison in
+Section~\ref{sec:completed} a controlled one.
+
+\begin{table}[h]
+  \caption{What distinguishes each completed run. The kernel width $\sigma$ is
+  given in bins and, in parentheses, in fractional coordinates. The evaluated
+  checkpoint is the one with the lowest validation loss.}
+  \label{tab:changes}
+  \begin{footnotesize}
+  \begin{tabular}{llll}
+    \toprule
+    Run & Loss & Kernel width $\sigma$ & Eval.\ epoch \\
+    \midrule
+    C1 & flat          & ---                 & 159 \\
+    C2 & soft, narrow  & 2 bins ($0.002$)    & 311 \\
+    C3 & soft, wide    & 64 bins ($0.063$)   & 251 \\
+    \bottomrule
+  \end{tabular}
+  \end{footnotesize}
+\end{table}
+
+In plain terms:
+
+\paragraph{Loss: flat versus soft.}
+\emph{Flat} is the original cross-entropy. \emph{Soft} spreads the training
+target over neighbouring bins instead of demanding one exact bin, and treats bin
+1023 and bin 0 as adjacent. A near miss is therefore rewarded, and the
+periodicity of the cell is respected.
+
+\paragraph{Bin grid.}
+The original code converted a coordinate to a bin by multiplying by 1023 but
+converted back by dividing by 1024. Encoding and decoding sat on grids offset by
+about one and a half bin widths, so a structure could not be written and read
+back unchanged. The corrected grid uses the same spacing in both directions,
+and all three runs below use it. This is a correctness fix, not a modelling
+choice, and it is the one respect in which these runs differ from the released
+code regardless of their objective.
+
+\paragraph{Augmentation.}
+Where a crystal's origin sits is arbitrary: sliding every atom by the same
+amount describes the same material. Augmentation exploits that by shifting all
+coordinates by a random amount each time a structure is shown to the model, so
+it sees many equivalent versions. We later found this was implemented
+incorrectly --- it reproduced the ordering the tokenizer would emit for a
+shifted structure only $31\%$ of the time --- and disabled it for every later
+run.
+
+\subsection{Completed results}
+\label{sec:completed}
+
+Table~\ref{tab:completed} gives the runs finished so far. All rates are over
+the full 180 benchmark structures, with a formula that produced nothing counted
+as a failure. One structure is $0.56$ percentage points, so a gap of one point
+is under two structures.
+
+\begin{table}[h]
+  \caption{Match rate (\%) on the 180-structure benchmark. Each block is one
+  run; rows within it are the number of lowest-energy candidates scored.
+  Str = structure, SG = space group, Con = both.}
+  \label{tab:completed}
+  \begin{footnotesize}
+  \begin{tabular}{lrrrrrrrrrrrr}
+    \toprule
+    & \multicolumn{3}{c}{top-1} & \multicolumn{3}{c}{top-5}
+    & \multicolumn{3}{c}{top-10} & \multicolumn{3}{c}{top-25} \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}\cmidrule(lr){11-13}
+    Run & Str & SG & Con & Str & SG & Con & Str & SG & Con & Str & SG & Con \\
+    \midrule
+    C1 & 48.3 & 40.6 & 38.9 & 52.8 & 48.9 & 46.7 & 53.9 & 50.0 & 47.2 & 54.4 & 51.7 & 48.9 \\
+    C2 & 47.8 & 38.3 & 37.2 & 51.1 & 43.3 & 41.7 & 53.3 & 45.6 & 44.4 & 53.9 & 48.9 & 47.8 \\
+    C3 & 45.0 & 33.9 & 32.2 & 48.3 & 36.7 & 35.0 & 51.1 & 38.9 & 36.7 & 52.2 & 40.0 & 37.8 \\
+    \bottomrule
+  \end{tabular}
+  \end{footnotesize}
+\end{table}
+
+The ordering is the same at every budget, and it is monotone in the width of
+the target kernel.
+
+\paragraph{Flat cross-entropy is the strongest objective tested.}
+C1 leads on all three metrics at every budget but one. At top-25 it reaches
+$54.4$ on structure, $51.7$ on space group and $48.9$ on both together, against
+$53.9 / 48.9 / 47.8$ for the narrow kernel and $52.2 / 40.0 / 37.8$ for the wide
+one. The original objective, in other words, is not the thing holding these
+models back.
+
+\paragraph{Widening the kernel costs symmetry, not geometry.}
+Across the whole range from flat to $\sigma = 64$, the structure rate at top-25
+moves by $2.2$ points while the space-group rate moves by $11.7$ and the
+consensus rate by $11.1$. The damage is concentrated almost entirely in
+symmetry, and it grows with $\sigma$ rather than appearing at one particular
+width. That rules out the most hopeful reading of the narrow result --- that
+$\sigma = 2$ was simply too small to reach the scale at which the model errs,
+and that a wider kernel would do better. A wider kernel does worse, steadily.
+
+\paragraph{Why the mechanism predicts exactly this.}
+A soft target spreads probability over neighbouring bins, so a near miss on any
+one coordinate is cheap. Symmetry, however, is a property of \emph{exact
+relations} between coordinates --- an atom at $0.25$ paired with one at $0.75$,
+or an atom sitting on a special position. Nudging each coordinate independently
+costs almost nothing under a wrapped-Gaussian target but destroys those
+relations, and destroying them is precisely what the space-group test detects.
+Mean positional accuracy and symmetry are not the same quantity, and this
+objective buys the first at the expense of the second.
+
+\paragraph{What cannot be read off it.}
+The three runs stopped at different epochs, because the soft-loss variants
+ceased improving earlier than flat cross-entropy; C2's and C3's evaluated
+checkpoints are their own best, not an arbitrary truncation, but the comparison
+is not at equal optimisation effort. Differences under about a point correspond
+to fewer than two structures and should not be read as effects. Nothing here
+separates the choice of objective from the choice of \emph{representation}: all
+three runs predict independent per-coordinate bins, and that is the shared
+assumption the space-group gap most likely indicts.
+
+\section{Status and open items}
+\label{sec:status}
+
+Recorded here so that measured results and pending work stay separable.
+
+\begin{itemize}
+  \item The runs in Table~\ref{tab:completed} stopped at different epochs,
+        because the soft-loss variants ceased improving earlier than flat
+        cross-entropy. Differences of under about a point correspond to fewer
+        than two structures out of 180 and should not be read as effects.
+  \item The kernel-width question is settled for this family of objectives.
+        At $\sigma = 2$ bins the kernel is far narrower than the measured
+        validation coordinate error of $\approx 0.125$, which suggested a wider
+        kernel should help; at $\sigma = 64$ it is substantially worse on every
+        metric. Further variation of $\sigma$ is not worth the compute.
+  \item An auxiliary space-group output, trained alongside the tokens, is
+        under evaluation. Its purpose is to force symmetry into the internal
+        representation rather than into the coordinate targets.
+  \item Translation augmentation is disabled everywhere. It reproduced the
+        tokenizer's own site ordering for a shifted structure only $31\%$ of
+        the time, so it was training the model on sequences the tokenizer would
+        never produce. The cause is not yet identified; the cell reduction
+        applied before tokenization is the main suspect, since that is also not
+        invariant to relabelling the cell axes.
+  \item Objectives that change what the model can represent --- the auxiliary
+        space-group head, a loss on interatomic distances under the
+        minimum-image convention, or a Wyckoff-based representation that
+        enforces symmetry by construction --- address the measured deficit more
+        directly than further variation of the coordinate kernel.
+\end{itemize}
+
+\end{document}
