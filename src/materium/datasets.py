@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 import pickle
+import multiprocessing
 from torch.utils.data import Dataset
 from dataclasses import dataclass
 from pymatgen.core import Lattice, Structure, Element, Composition
@@ -477,13 +478,25 @@ class CrystalDataset(Dataset):
             os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
             # Pass only lightweight ints as task messages; models and numpy
             # arrays are loaded once per worker via the initializer.
+            # 'spawn', not the Linux default 'fork'. The parent has already
+            # imported torch and built a tokenizer, which constructs TOSS/BERTOS
+            # models; forking that and then re-entering torch in the child
+            # deadlocks -- observed as Tokenizing stuck at 0/N with the job
+            # burning no CPU at all for 25 minutes. Spawned children start clean
+            # and rebuild the tokenizer from the picklable initargs below.
+            mp_ctx = multiprocessing.get_context("spawn")
             with ProcessPoolExecutor(
                 max_workers=24,
+                mp_context=mp_ctx,
                 initializer=_worker_initializer,
                 initargs=(self.tokenizer.to_dict(), self.dataset.data_path),
             ) as executor:
+                # chunksize was 1024, which meant the progress bar could not move
+                # until a worker had finished 1024 structures -- indistinguishable
+                # from a hang. Smaller chunks also balance the load better when
+                # some compositions are far slower to assign oxidation states.
                 self.processed_data = list(tqdm(
-                    executor.map(_tokenize_structure, indices, chunksize=1024),
+                    executor.map(_tokenize_structure, indices, chunksize=32),
                     total=len(self.dataset),
                     desc="Tokenizing",
                 ))

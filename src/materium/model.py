@@ -447,6 +447,7 @@ class LLamaTransformer(nn.Module):
         self,
         params: ModelArgs,
         loss_weights: Optional[torch.Tensor] = None,
+        sg_aux_weight: float = 0.0,
         token_layout: Optional[TokenLayout] = None,
         coord_loss_config: Optional[CoordLossConfig] = None,
     ):
@@ -489,6 +490,16 @@ class LLamaTransformer(nn.Module):
             self.layers.append(TransformerBlock(layer_id, params))
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+
+        # Auxiliary space-group prediction. Space group is already available as a
+        # conditioning input, but conditioning injects it; this forces the trunk
+        # representation to encode it. That matters because at CSP inference time
+        # the space group is unknown, so the condition is absent and only what the
+        # representation learned is left. 231 classes: the 230 groups, 1-indexed.
+        self.sg_aux_weight = float(sg_aux_weight)
+        self.sg_head = (
+            nn.Linear(params.dim, 231) if self.sg_aux_weight > 0.0 else None
+        )
 
         # share the unembedding parameters with the embedding parameters
         self.tok_embeddings.weight = (
@@ -585,6 +596,8 @@ class LLamaTransformer(nn.Module):
         conditions: Optional[Dict[str, torch.Tensor]] = {},
         return_hidden_states: bool = False,
         target_roles: Optional[torch.Tensor] = None,
+        sg_targets: Optional[torch.Tensor] = None,
+        sg_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
@@ -634,6 +647,30 @@ class LLamaTransformer(nn.Module):
                     label_smoothing=0.0,
                 )
                 self.last_metrics = {}
+
+            # Pooled over the real tokens only, so padding cannot dilute the
+            # representation a short structure contributes.
+            if self.sg_head is not None and sg_targets is not None:
+                valid = (targets != self.pad_id).unsqueeze(-1).to(h.dtype)
+                hs = h[:, -seqlen:, :]
+                pooled = (hs * valid).sum(1) / valid.sum(1).clamp_min(1.0)
+                sg_logits = self.sg_head(pooled.float())
+
+                # sg_mask marks labels the dataset could not determine; those
+                # default to P1 and would otherwise teach the head that most
+                # crystals are triclinic.
+                keep = sg_targets > 0
+                if sg_mask is not None:
+                    keep = keep & (~sg_mask)
+
+                if keep.any():
+                    sg_loss = F.cross_entropy(sg_logits[keep], sg_targets[keep])
+                    self.last_loss = self.last_loss + self.sg_aux_weight * sg_loss
+                    with torch.no_grad():
+                        acc = (sg_logits[keep].argmax(-1) == sg_targets[keep]).float().mean()
+                    self.last_metrics["sg_aux_loss"] = float(sg_loss)
+                    self.last_metrics["sg_aux_acc"] = float(acc)
+                    self.last_metrics["sg_aux_frac"] = float(keep.float().mean())
         else:
             # inference-time mini-optimization: only forward the output on the very last position
             logits = self.output(

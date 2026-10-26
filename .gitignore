@@ -12,6 +12,7 @@ REVIEW
 *.sh
 *.err
 *.out
+*.md
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

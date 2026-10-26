@@ -188,8 +188,12 @@ class TOSSPredictor:
         self.NC_model = pyg_GCNPredictor(in_feats=15, hidden_feats=[256, 256, 256, 256], 
                             predictor_hidden_feats=64, n_tasks=12, predictor_dropout=0.3) 
                             
-        self.LP_model.load_state_dict(torch.load(self.toss_path+"/models/pyg_Hetero_GCN_s_0608.pth"))
-        self.NC_model.load_state_dict(torch.load(self.toss_path+"/models/pyg_GCN_s_0609.pth"))
+        self.LP_model.load_state_dict(torch.load(
+            self.toss_path + "/models/pyg_Hetero_GCN_s_0608.pth",
+            map_location="cpu"))
+        self.NC_model.load_state_dict(torch.load(
+            self.toss_path + "/models/pyg_GCN_s_0609.pth",
+            map_location="cpu"))
 
 
     def predict_structure(self, structure: Structure) -> Structure:
