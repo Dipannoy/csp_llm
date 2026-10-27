@@ -151,8 +151,9 @@ standing, and the paragraphs below explain each one.
 \begin{table}[h]
   \caption{Every change made to the released model, with its present standing.
   \emph{Kept} means it is active in all current runs; \emph{harmful} and
-  \emph{inert} are measured verdicts explained in
-  Section~\ref{sec:verdict}.}
+  \emph{inert} are measured verdicts explained in Section~\ref{sec:verdict}.
+  \emph{Measured} means a run isolating the change has finished and is reported
+  in Table~\ref{tab:completed}, but that too few runs exist to draw a verdict.}
   \label{tab:catalogue}
   \begin{footnotesize}
   \begin{tabular}{llp{2.45cm}}
@@ -160,12 +161,12 @@ standing, and the paragraphs below explain each one.
     Change & Kind & Standing \\
     \midrule
     Circular soft-target loss      & objective     & harmful \\
-    Hard/soft target mixing        & objective     & under evaluation \\
+    Hard/soft target mixing        & objective     & measured (C5) \\
     Per-role loss normalisation    & objective     & kept (soft runs) \\
     Auxiliary space-group head     & architecture  & inert \\
     Corrected bin grid             & representation & kept \\
     Lattice-token validation       & representation & kept \\
-    Oxidation states from TOSS     & representation & under evaluation \\
+    Oxidation states from TOSS     & representation & measured (C4) \\
     Mandatory cell emission        & decoding      & kept \\
     Bin-only coordinate slots      & decoding      & kept \\
     Sequence-length auto-sizing    & decoding      & kept \\
@@ -262,32 +263,35 @@ produce. It is disabled in every run reported here.
 \subsection{What changed in each run}
 \label{sec:changes}
 
-The three completed runs share their training data, their bin grid, their
-oxidation handling and their epoch budget, and none of them uses augmentation or
-an auxiliary output. They differ in the training objective alone, which is what
-makes Table~\ref{tab:changes} short and the comparison in
-Section~\ref{sec:completed} a controlled one.
+Five runs have finished. All five share their training data, their bin grid
+and their epoch budget, and none uses augmentation. C1--C3 differ from one
+another in the training objective alone, which is what makes the comparison
+between those three a controlled one; C4 and C5 each vary one further thing,
+named in Table~\ref{tab:changes}, and are therefore read against C1 rather than
+against each other.
 
 \begin{table}[h]
   \caption{What distinguishes each completed run. The kernel width $\sigma$ is
   given in bins and, in parentheses, in fractional coordinates. The evaluated
-  checkpoint is the one with the lowest validation loss.}
+  checkpoint is the one with the lowest validation loss. C1--C3 vary the
+  objective only; the last column names the additional change in C4 and C5.}
   \label{tab:changes}
   \begin{footnotesize}
-  \begin{tabular}{llll}
+  \begin{tabular}{lllp{2.1cm}l}
     \toprule
-    Run & Loss & Kernel width $\sigma$ & Eval.\ epoch \\
+    Run & Loss & Kernel width $\sigma$ & Other change & Eval.\ epoch \\
     \midrule
-    C1 & flat          & ---                 & 159 \\
-    C2 & soft, narrow  & 2 bins ($0.002$)    & 311 \\
-    C3 & soft, wide    & 64 bins ($0.063$)   & 251 \\
+    C1 & flat          & ---                 & ---                       & 159 \\
+    C2 & soft, narrow  & 2 bins ($0.002$)    & ---                       & 311 \\
+    C3 & soft, wide    & 64 bins ($0.063$)   & ---                       & 251 \\
+    C4 & flat          & ---                 & oxidation states from TOSS & 342 \\
+    C5 & soft, narrow  & 2 bins ($0.002$)    & hard/soft mixing          & 107 \\
     \bottomrule
   \end{tabular}
   \end{footnotesize}
 \end{table}
 
-Section~\ref{sec:catalogue} explains each of these changes; only the
-objective differs between the three.
+Section~\ref{sec:catalogue} explains each of these changes.
 
 \subsection{Completed results}
 \label{sec:completed}
@@ -295,12 +299,14 @@ objective differs between the three.
 Table~\ref{tab:completed} gives the runs finished so far. All rates are over
 the full 180 benchmark structures, with a formula that produced nothing counted
 as a failure. One structure is $0.56$ percentage points, so a gap of one point
-is under two structures.
+is under two structures. Two further runs, isolating the auxiliary space-group
+head with and without the soft objective, are still being evaluated.
 
 \begin{table}[h]
-  \caption{Match rate (\%) on the 180-structure benchmark. Each block is one
-  run; rows within it are the number of lowest-energy candidates scored.
-  Str = structure, SG = space group, Con = both.}
+  \caption{Match rate (\%) on the 180-structure benchmark. Columns are grouped
+  by the number of lowest-energy candidates scored. Str = structure,
+  SG = space group, Con = both. C1--C3 above the rule vary the objective only;
+  C4 and C5 each vary one further thing (Table~\ref{tab:changes}).}
   \label{tab:completed}
   \begin{footnotesize}
   \begin{tabular}{lrrrrrrrrrrrr}
@@ -313,16 +319,20 @@ is under two structures.
     C1 & 48.3 & 40.6 & 38.9 & 52.8 & 48.9 & 46.7 & 53.9 & 50.0 & 47.2 & 54.4 & 51.7 & 48.9 \\
     C2 & 47.8 & 38.3 & 37.2 & 51.1 & 43.3 & 41.7 & 53.3 & 45.6 & 44.4 & 53.9 & 48.9 & 47.8 \\
     C3 & 45.0 & 33.9 & 32.2 & 48.3 & 36.7 & 35.0 & 51.1 & 38.9 & 36.7 & 52.2 & 40.0 & 37.8 \\
+    \midrule
+    C4 & 49.4 & 41.7 & 39.4 & 52.2 & 48.9 & 45.0 & 53.9 & 51.7 & 47.8 & 56.1 & 54.4 & 49.4 \\
+    C5 & 48.9 & 39.4 & 37.8 & 50.6 & 44.4 & 42.2 & 53.3 & 47.8 & 46.1 & 54.4 & 50.6 & 48.9 \\
     \bottomrule
   \end{tabular}
   \end{footnotesize}
 \end{table}
 
-The ordering is the same at every budget, and it is monotone in the width of
-the target kernel.
+Among C1--C3 the ordering is the same at every budget, and it is monotone in
+the width of the target kernel.
 
-\paragraph{Flat cross-entropy is the strongest objective tested.}
-C1 leads on all three metrics at every budget but one. At top-25 it reaches
+\paragraph{Flat cross-entropy is the strongest of the three objectives tested.}
+Of the three runs that differ in the objective alone, C1 leads on all three
+metrics at every budget but one. At top-25 it reaches
 $54.4$ on structure, $51.7$ on space group and $48.9$ on both together, against
 $53.9 / 48.9 / 47.8$ for the narrow kernel and $52.2 / 40.0 / 37.8$ for the wide
 one. The original objective, in other words, is not the thing holding these
@@ -347,11 +357,37 @@ relations, and destroying them is precisely what the space-group test detects.
 Mean positional accuracy and symmetry are not the same quantity, and this
 objective buys the first at the expense of the second.
 
+\paragraph{C4: oxidation states from TOSS.}
+C4 replaces the heuristic oxidation assignment with states taken from TOSS, and
+is otherwise C1. It records the highest rates measured so far at top-25 ---
+$56.1$ on structure, $54.4$ on space group and $49.4$ on both, against
+$54.4 / 51.7 / 48.9$ for C1 --- and it also leads C1 at top-1 on all three
+metrics and at top-10 on space group. At top-5 it is $0.6$ below C1 on structure
+and $1.7$ below on consensus. Two facts qualify the comparison and are recorded
+here rather than interpreted. First, C4's evaluated checkpoint is at epoch 342
+against C1's 159, so the two are not at equal optimisation effort. Second, the
+oxidation signal is incomplete: in $108$ of the $180$ formulas BERTOS returned
+no valid oxidation token for at least one element, and the pipeline fell back to
+the full set of common states for that element, so for $60\%$ of the benchmark
+the conditioning is weaker than the run nominally specifies. Copper accounts for
+the largest share of the fallbacks, followed by gallium, iridium and cobalt. Of
+the $9{,}000$ candidates sampled, $6{,}212$ survived relaxation, a mean of
+$34.5$ per formula; $17$ formulas returned fewer than ten and one, Ta$_8$Fe$_4$,
+returned none and is counted as a failure.
+
+\paragraph{C5: hard/soft target mixing.}
+C5 interpolates between the soft and the one-hot target, and is otherwise C2. At
+top-25 it reaches $54.4 / 50.6 / 48.9$, which is level with C1 on structure and
+consensus and $1.1$ below on space group, and above C2 on every metric at every
+budget. Its evaluated checkpoint is at epoch 107, far short of the others, so it
+is the least comparable run in the table and is reported for completeness rather
+than as a measurement of the mixing itself.
+
 \paragraph{What cannot be read off it.}
-The three runs stopped at different epochs, because the soft-loss variants
-ceased improving earlier than flat cross-entropy; C2's and C3's evaluated
-checkpoints are their own best, not an arbitrary truncation, but the comparison
-is not at equal optimisation effort. Differences under about a point correspond
+The runs stopped at different epochs, because the soft-loss variants ceased
+improving earlier than flat cross-entropy; each evaluated checkpoint is its own
+best, not an arbitrary truncation, but the comparison is not at equal
+optimisation effort. Differences under about a point correspond
 to fewer than two structures and should not be read as effects. Nothing here
 separates the choice of objective from the choice of \emph{representation}: all
 three runs predict independent per-coordinate bins, and that is the shared
@@ -424,6 +460,10 @@ Recorded here so that measured results and pending work stay separable.
         because the soft-loss variants ceased improving earlier than flat
         cross-entropy. Differences of under about a point correspond to fewer
         than two structures out of 180 and should not be read as effects.
+  \item Five runs is too few to attribute the differences in
+        Table~\ref{tab:completed} to the changes that distinguish them. C4 and
+        C5 in particular each vary a second factor against C1, and no change has
+        yet been repeated at a matched epoch budget.
   \item The kernel-width question is settled for this family of objectives.
         At $\sigma = 2$ bins the kernel is far narrower than the measured
         validation coordinate error of $\approx 0.125$, which suggested a wider
