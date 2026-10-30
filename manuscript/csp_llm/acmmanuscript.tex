@@ -406,9 +406,8 @@ supplying at epoch 116.
 
 \paragraph{Later checkpoints do not improve the rates.}
 Because the evaluations were launched while training was still running, three
-runs were scored on a checkpoint that their own training later improved on. Two
-have since been re-scored at their final best-validation checkpoint, with the
-third pending:
+runs were scored on a checkpoint that their own training later improved on. All
+three have since been re-scored at their final best-validation checkpoint:
 
 \begin{center}
   \begin{footnotesize}
@@ -421,17 +420,24 @@ third pending:
     \midrule
     C5 & epoch 107 (val $4.157$) & 54.4 & 50.6 & 48.9 \\
     C5 & epoch 447 (val $4.134$) & 53.3 & 49.4 & 47.8 \\
+    \midrule
+    C7 & epoch 359 (val $4.601$) & 49.4 & 43.3 & 42.2 \\
+    C7 & epoch 407 (val $4.579$) & 50.0 & 43.9 & 42.8 \\
     \bottomrule
   \end{tabular}
   \end{footnotesize}
 \end{center}
 
 \noindent
-All rates are at top-25. Neither run improves: C1 is unchanged on structure and
-$1.7$ lower on space group after $311$ further epochs, and C5 is about a point
-lower on all three after $340$. Both differences are at or below the
-two-structure noise floor, so the result to record is that the rates are flat in
-the epoch budget, not that more training hurts. This matters for two reasons.
+All rates are at top-25. None of the three moves materially, and they do not
+even move in a consistent direction: C1 is unchanged on structure and $1.7$
+lower on space group after $311$ further epochs, C5 is about a point lower on
+all three after $340$, and C7 is $0.6$ \emph{higher} on all three after $48$.
+Every one of these differences is at or below the two-structure noise floor, and
+the mixed signs are themselves the argument that what is being seen is noise
+rather than a trend: the result to record is that the rates are flat in the
+epoch budget, not that more training helps or hurts. This matters for two
+reasons.
 It retires the qualification attached to C4 and C6 above --- a run that trained
 longer than C1 cannot be dismissed as having simply had more optimisation
 effort, because giving C1 that effort does not move its rates --- and it means
