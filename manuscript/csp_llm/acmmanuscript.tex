@@ -150,8 +150,8 @@ standing, and the paragraphs below explain each one.
 
 \begin{table}[h]
   \caption{Every change made to the released model, with its present standing.
-  \emph{Kept} means it is active in all current runs; \emph{harmful} and
-  \emph{inert} are measured verdicts explained in Section~\ref{sec:verdict}.
+  \emph{Kept} means it is active in all current runs; \emph{harmful} is a
+  measured verdict explained in Section~\ref{sec:verdict}.
   \emph{Measured} means a run isolating the change has finished and is reported
   in Table~\ref{tab:completed}, but that too few runs exist to draw a verdict.}
   \label{tab:catalogue}
@@ -163,7 +163,7 @@ standing, and the paragraphs below explain each one.
     Circular soft-target loss      & objective     & harmful \\
     Hard/soft target mixing        & objective     & measured (C5) \\
     Per-role loss normalisation    & objective     & kept (soft runs) \\
-    Auxiliary space-group head     & architecture  & inert \\
+    Auxiliary space-group head     & architecture  & measured (C6, C7) \\
     Corrected bin grid             & representation & kept \\
     Lattice-token validation       & representation & kept \\
     Oxidation states from TOSS     & representation & measured (C4) \\
@@ -263,18 +263,19 @@ produce. It is disabled in every run reported here.
 \subsection{What changed in each run}
 \label{sec:changes}
 
-Five runs have finished. All five share their training data, their bin grid
+Seven runs have finished. All seven share their training data, their bin grid
 and their epoch budget, and none uses augmentation. C1--C3 differ from one
 another in the training objective alone, which is what makes the comparison
-between those three a controlled one; C4 and C5 each vary one further thing,
-named in Table~\ref{tab:changes}, and are therefore read against C1 rather than
-against each other.
+between those three a controlled one; C4--C7 each vary one further thing, named
+in Table~\ref{tab:changes}, and are therefore read against C1 or C2 --- whichever
+shares their objective --- rather than against each other.
 
 \begin{table}[h]
   \caption{What distinguishes each completed run. The kernel width $\sigma$ is
   given in bins and, in parentheses, in fractional coordinates. The evaluated
-  checkpoint is the one with the lowest validation loss. C1--C3 vary the
-  objective only; the last column names the additional change in C4 and C5.}
+  checkpoint is the one with the lowest validation loss at the time the
+  evaluation was launched. C1--C3 vary the objective only; the last column names
+  the additional change in C4--C7.}
   \label{tab:changes}
   \begin{footnotesize}
   \begin{tabular}{lllp{2.1cm}l}
@@ -286,6 +287,8 @@ against each other.
     C3 & soft, wide    & 64 bins ($0.063$)   & ---                       & 251 \\
     C4 & flat          & ---                 & oxidation states from TOSS & 342 \\
     C5 & soft, narrow  & 2 bins ($0.002$)    & hard/soft mixing          & 107 \\
+    C6 & flat          & ---                 & auxiliary space-group head & 116 \\
+    C7 & soft, narrow  & 2 bins ($0.002$)    & auxiliary space-group head & 359 \\
     \bottomrule
   \end{tabular}
   \end{footnotesize}
@@ -299,14 +302,13 @@ Section~\ref{sec:catalogue} explains each of these changes.
 Table~\ref{tab:completed} gives the runs finished so far. All rates are over
 the full 180 benchmark structures, with a formula that produced nothing counted
 as a failure. One structure is $0.56$ percentage points, so a gap of one point
-is under two structures. Two further runs, isolating the auxiliary space-group
-head with and without the soft objective, are still being evaluated.
+is under two structures.
 
 \begin{table}[h]
   \caption{Match rate (\%) on the 180-structure benchmark. Columns are grouped
   by the number of lowest-energy candidates scored. Str = structure,
   SG = space group, Con = both. C1--C3 above the rule vary the objective only;
-  C4 and C5 each vary one further thing (Table~\ref{tab:changes}).}
+  C4--C7 each vary one further thing (Table~\ref{tab:changes}).}
   \label{tab:completed}
   \begin{footnotesize}
   \begin{tabular}{lrrrrrrrrrrrr}
@@ -322,6 +324,8 @@ head with and without the soft objective, are still being evaluated.
     \midrule
     C4 & 49.4 & 41.7 & 39.4 & 52.2 & 48.9 & 45.0 & 53.9 & 51.7 & 47.8 & 56.1 & 54.4 & 49.4 \\
     C5 & 48.9 & 39.4 & 37.8 & 50.6 & 44.4 & 42.2 & 53.3 & 47.8 & 46.1 & 54.4 & 50.6 & 48.9 \\
+    C6 & 50.6 & 42.8 & 40.6 & 53.9 & 48.9 & 46.1 & 55.0 & 51.1 & 48.3 & 56.1 & 54.4 & 50.6 \\
+    C7 & 43.9 & 37.2 & 35.6 & 45.6 & 39.4 & 37.8 & 48.9 & 41.7 & 40.6 & 49.4 & 43.3 & 42.2 \\
     \bottomrule
   \end{tabular}
   \end{footnotesize}
@@ -383,6 +387,58 @@ budget. Its evaluated checkpoint is at epoch 107, far short of the others, so it
 is the least comparable run in the table and is reported for completeness rather
 than as a measurement of the mixing itself.
 
+\paragraph{C6 and C7: the auxiliary space-group head.}
+C6 adds the auxiliary head to flat cross-entropy and C7 adds it to the narrow
+soft target, so the pair isolates the head against C1 and C2 respectively. The
+two move in opposite directions. C6 records the highest rates in the table at
+top-25 --- $56.1 / 54.4 / 50.6$ --- matching C4 on structure and space group and
+exceeding every other run on consensus, from a checkpoint at epoch 116. C7 is the
+weakest run in the table on structure at $49.4$, below even the wide kernel, while
+sitting above C3 on space group and consensus. Taken against the runs that share
+their objective, the head is worth $+1.7 / +2.8 / +1.7$ on top of flat
+cross-entropy and $-4.5 / -5.6 / -5.6$ on top of the soft target. Two
+qualifications. The first is the epoch gap in both directions: C6's checkpoint is
+at epoch 116 against C1's 159, and C7's at 359 against C2's 311. The second is
+that the head's own training signal is extinguished long before either
+checkpoint, for the reason set out in Section~\ref{sec:verdict}, so whatever
+separates C6 from C1 is not attributable to a gradient the head was still
+supplying at epoch 116.
+
+\paragraph{Later checkpoints do not improve the rates.}
+Because the evaluations were launched while training was still running, three
+runs were scored on a checkpoint that their own training later improved on. Two
+have since been re-scored at their final best-validation checkpoint, with the
+third pending:
+
+\begin{center}
+  \begin{footnotesize}
+  \begin{tabular}{llrrr}
+    \toprule
+    Run & Checkpoint & Str & SG & Con \\
+    \midrule
+    C1 & epoch 159 (val $1.806$) & 54.4 & 51.7 & 48.9 \\
+    C1 & epoch 470 (val $1.805$) & 54.4 & 50.0 & 47.8 \\
+    \midrule
+    C5 & epoch 107 (val $4.157$) & 54.4 & 50.6 & 48.9 \\
+    C5 & epoch 447 (val $4.134$) & 53.3 & 49.4 & 47.8 \\
+    \bottomrule
+  \end{tabular}
+  \end{footnotesize}
+\end{center}
+
+\noindent
+All rates are at top-25. Neither run improves: C1 is unchanged on structure and
+$1.7$ lower on space group after $311$ further epochs, and C5 is about a point
+lower on all three after $340$. Both differences are at or below the
+two-structure noise floor, so the result to record is that the rates are flat in
+the epoch budget, not that more training hurts. This matters for two reasons.
+It retires the qualification attached to C4 and C6 above --- a run that trained
+longer than C1 cannot be dismissed as having simply had more optimisation
+effort, because giving C1 that effort does not move its rates --- and it means
+the validation loss has stopped tracking the benchmark well before the end of
+training, since C1's validation loss still improved between epoch 159 and epoch 470,
+from $1.806$ to $1.805$, while gaining nothing on any of the three metrics.
+
 \paragraph{What cannot be read off it.}
 The runs stopped at different epochs, because the soft-loss variants ceased
 improving earlier than flat cross-entropy; each evaluated checkpoint is its own
@@ -431,10 +487,12 @@ task. Optimising the soft objective more successfully does not produce better
 crystals, which is the strongest available evidence that this objective is
 misaligned with the metric rather than merely under-trained.
 
-\paragraph{The least useful change: the auxiliary space-group head.}
-Distinct from the above in that it does no harm and no good. The head reaches
-$100.0\%$ validation accuracy with its loss decaying to $6\times10^{-4}$, so
-after roughly thirty epochs it contributes almost no gradient. The cause is that
+\paragraph{The auxiliary space-group head: a dead training signal.}
+The finding here is about the head's gradient, not about its effect on the
+benchmark, which is reported for C6 and C7 in Section~\ref{sec:completed} and is
+not yet attributable. The head reaches $100.0\%$ validation accuracy with its
+loss decaying to $6\times10^{-4}$, so after roughly thirty epochs it contributes
+almost no gradient. The cause is that
 it pools over the whole teacher-forced sequence, and so is handed every
 coordinate and the complete cell before being asked for the space group --- which
 is precisely what a symmetry-detection routine computes from exactly that input.
@@ -447,8 +505,9 @@ rather than read off a complete one. That has not been implemented.
 Nothing changed about the training objective has improved the benchmark. The
 measurable gains come from correctness work on the representation and the
 decoder; the measurable losses come from softening the coordinate target. The
-one architectural change is inert as currently posed. Section~\ref{sec:status}
-lists what this suggests should be attempted next.
+one architectural change stops supplying a gradient early, for the reason given
+above, whatever its effect on the rates turns out to be.
+Section~\ref{sec:status} lists what this suggests should be attempted next.
 
 \section{Status and open items}
 \label{sec:status}
@@ -469,9 +528,13 @@ Recorded here so that measured results and pending work stay separable.
         validation coordinate error of $\approx 0.125$, which suggested a wider
         kernel should help; at $\sigma = 64$ it is substantially worse on every
         metric. Further variation of $\sigma$ is not worth the compute.
-  \item An auxiliary space-group output, trained alongside the tokens, is
-        under evaluation. Its purpose is to force symmetry into the internal
-        representation rather than into the coordinate targets.
+  \item An auxiliary space-group output, trained alongside the tokens, has now
+        been run both with and without the soft objective (C6 and C7). Its
+        purpose was to force symmetry into the internal representation rather
+        than into the coordinate targets, and as posed it does not do that: the
+        head is pooled over the whole teacher-forced sequence and solves
+        recognition rather than prediction. Pooling over a prefix instead is the
+        change that would test the original idea, and it is not implemented.
   \item Translation augmentation is disabled everywhere. It reproduced the
         tokenizer's own site ordering for a shifted structure only $31\%$ of
         the time, so it was training the model on sequences the tokenizer would
