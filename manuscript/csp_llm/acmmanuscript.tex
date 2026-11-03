@@ -141,12 +141,14 @@ positions. Both observations motivated the loss work reported here.
 \subsection{Changes made to the released model}
 \label{sec:catalogue}
 
-Eleven changes were made to the released code. They fall into four kinds:
+Twelve changes were made to the released code. They fall into five kinds:
 changes to the training \emph{objective}, changes to the model
 \emph{architecture}, changes to the \emph{representation} the model reads and
-writes, and changes to the \emph{decoding} procedure that turns a trained model
-into structures. Table~\ref{tab:catalogue} lists them with their present
-standing, and the paragraphs below explain each one.
+writes, changes to the \emph{decoding} procedure that turns a trained model into
+structures, and changes to the \emph{training} procedure itself that alter no
+part of the model but decide whether a run is what it reports itself to be.
+Table~\ref{tab:catalogue} lists them with their present standing, and the
+paragraphs below explain each one.
 
 \begin{table}[h]
   \caption{Every change made to the released model, with its present standing.
@@ -171,6 +173,7 @@ standing, and the paragraphs below explain each one.
     Bin-only coordinate slots      & decoding      & kept \\
     Sequence-length auto-sizing    & decoding      & kept \\
     Translation augmentation       & training      & disabled \\
+    Checkpoint-resume repair       & training      & kept \\
     \bottomrule
   \end{tabular}
   \end{footnotesize}
@@ -259,6 +262,33 @@ $\mathrm{bin} \mapsto (\mathrm{bin}+k) \bmod B$. It reproduced the token
 sequence the tokenizer emits for a genuinely shifted structure only $31\%$ of
 the time, so it was training the model on sequences the tokenizer would never
 produce. It is disabled in every run reported here.
+
+\paragraph{Checkpoint-resume repair (training).}
+The released code cannot resume a run, and the way it fails is worth recording
+because it is silent. Resuming reconstructs the model from the saved
+\texttt{model\_config} alone, but the auxiliary head, the token layout and the
+coordinate-loss configuration are constructor arguments that
+\texttt{model\_config} does not carry. A resumed run therefore rebuilds a plain
+model: the auxiliary space-group head is dropped and the non-strict state-dict
+load discards its weights without complaint, and a resumed soft-target run comes
+back as flat cross-entropy. The only reason any of this surfaces is that the
+optimizer state no longer matches the rebuilt parameter list and refuses to
+load. Three further faults sit on the same path --- the checkpoint directory is
+looked up under the bare run name rather than the decorated one that training
+writes, and neither the save path nor the model configuration is bound at all on
+the resume branch, so both raise before the first epoch. All four are fixed: the
+directory is resolved, the save path and configuration are bound, the model is
+rebuilt from the flags the run was launched with, and any mismatched state-dict
+key is now printed rather than swallowed.
+
+This matters for the integrity of Table~\ref{tab:completed} rather than for its
+contents. Every run reported here trained from scratch in a single job and none
+was resumed, which we confirmed from the recorded launch flags, so no reported
+number comes from a model that had silently lost its head or its objective. The
+repair matters for what comes next: the cluster preempts long jobs, two runs on
+a second split have already been truncated by it, and before this fix any
+restart would have continued a different experiment from the one it claimed to
+be continuing.
 
 \subsection{What changed in each run}
 \label{sec:changes}
@@ -521,14 +551,22 @@ Section~\ref{sec:status} lists what this suggests should be attempted next.
 Recorded here so that measured results and pending work stay separable.
 
 \begin{itemize}
-  \item The runs in Table~\ref{tab:completed} stopped at different epochs,
-        because the soft-loss variants ceased improving earlier than flat
-        cross-entropy. Differences of under about a point correspond to fewer
+  \item The runs in Table~\ref{tab:completed} reach their lowest validation
+        loss at widely different epochs --- from 116 to 470 across the seven ---
+        and the ordering follows no pattern in the objective: the earliest of
+        all belongs to a flat cross-entropy run and the two latest to soft-target
+        runs. Differences of under about a point in the rates correspond to fewer
         than two structures out of 180 and should not be read as effects.
-  \item Five runs is too few to attribute the differences in
-        Table~\ref{tab:completed} to the changes that distinguish them. C4 and
-        C5 in particular each vary a second factor against C1, and no change has
-        yet been repeated at a matched epoch budget.
+  \item Seven runs is too few to attribute the differences in
+        Table~\ref{tab:completed} to the changes that distinguish them. C4--C7
+        each vary a second factor against C1 or C2, and no change has yet been
+        repeated at a matched epoch budget.
+  \item Validation loss has stopped being a useful guide to the benchmark. The
+        re-scored checkpoints improve on validation loss and do not improve on
+        any of the three rates, so the checkpoint-selection criterion used
+        throughout is chosen for a quantity that no longer predicts the
+        measurement. A selection rule based on the benchmark itself would need a
+        held-aside set of formulas, which does not exist yet.
   \item The kernel-width question is settled for this family of objectives.
         At $\sigma = 2$ bins the kernel is far narrower than the measured
         validation coordinate error of $\approx 0.125$, which suggested a wider
