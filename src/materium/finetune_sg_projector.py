@@ -231,10 +231,7 @@ if __name__ == "__main__":
     )
 
     # ── 6. W&B logging ──────────────────────────────────────────────────────
-    wandb.login(
-        key="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",
-        relogin=True,
-    )
+    wandb.login()
     wandb.init(
         entity="dipannoydip",
         project="materium_bertos",

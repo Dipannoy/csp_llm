@@ -1,3 +1,4 @@
+import glob
 import random
 from functools import partial
 import torch
@@ -48,7 +49,10 @@ from materium.tokenizer import (
     SortingOrder,
     SequenceOrder,
     calculate_stats_from_dataset,
+    tokenizer_from_dict,
 )
+from materium.wyckoff_tokenizer import WyckoffTokenizer
+from materium.wyckoff_generation import generate_wyckoff_structure
 
 
 def relax_structure_mattersim(
@@ -211,9 +215,13 @@ def train_model(
     device,
     start_epoch=0,
     ckpt_path="ckpt",
+    snapshot_epochs=(),
 ):
     """The main training loop."""
     model.train()
+    # The per-atom sampler's slot arithmetic assumes four-token atom blocks.
+    gen_fn = (generate_wyckoff_structure if getattr(tokenizer, "is_wyckoff", False)
+              else generate_structure)
 
     ema_model, ema_decay = None, 0.999
     scheduler = ReduceLROnPlateau(optimizer, "min", factor=0.5, patience=3)
@@ -299,7 +307,7 @@ def train_model(
             with torch.no_grad():
                 for gen_idx in range(8):
                     try:
-                        generated_material = generate_structure(
+                        generated_material = gen_fn(
                             model,
                             tokenizer,
                             device=DEVICE,
@@ -320,6 +328,22 @@ def train_model(
                         print(generated_material)
                     except Exception as e:
                         print("Exception while generation", e)
+        # Fixed-epoch snapshots, kept regardless of validation loss. Checkpoints
+        # are otherwise written only on improvement and last_checkpoint.pt is
+        # overwritten every epoch, so "the model after N epochs" would not exist
+        # to be evaluated. Epochs are 0-indexed: after 100 epochs, epoch == 99.
+        if epoch + 1 in snapshot_epochs:
+            os.makedirs(ckpt_path, exist_ok=True)
+            snap = os.path.join(ckpt_path, f"snapshot_after_{epoch + 1}_epochs.pt")
+            model.save(
+                snap,
+                optimizer=optimizer.state_dict(),
+                epoch=epoch,
+                loss=mean_loss_test,
+                tokenizer=tokenizer.to_dict(),
+            )
+            print(f"Saved fixed-epoch snapshot {snap}")
+
         last_path = os.path.join(ckpt_path, "last_checkpoint.pt")
         model.save(
             last_path,
@@ -379,13 +403,37 @@ def load_model(args):
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-    ckpt_path = os.path.join(os.path.dirname(__file__), "checkpoints", args.check_dir)
-    model, ckpt = LLamaTransformer.load(
-        os.path.join(ckpt_path, args.check_file), strict=False
+    # Training decorates the checkpoint directory with the tokenizer and model
+    # settings (see the fresh-model branch), while --check_dir is given as the
+    # bare strategy name. Resolving it here rather than making the caller repeat
+    # the suffix: passing the bare name is what every resume attempt has done,
+    # and it died on FileNotFoundError before reaching the first epoch.
+    ckpt_root = os.path.join(os.path.dirname(__file__), "checkpoints")
+    ckpt_path = os.path.join(ckpt_root, args.check_dir)
+    if not os.path.isdir(ckpt_path):
+        matches = sorted(glob.glob(os.path.join(ckpt_root, args.check_dir + "_*")))
+        if len(matches) != 1:
+            raise FileNotFoundError(
+                "cannot resolve --check_dir %r under %s: %d candidates %r"
+                % (args.check_dir, ckpt_root, len(matches), matches)
+            )
+        ckpt_path = matches[0]
+        print("resolved --check_dir %s -> %s" % (args.check_dir, ckpt_path))
+    # Read the checkpoint here rather than through LLamaTransformer.load, which
+    # constructs the model from model_config alone. The auxiliary head, the token
+    # layout and the coordinate-loss configuration are constructor arguments and
+    # are NOT part of model_config, so that path rebuilds a plain model: the
+    # sg_head is dropped, strict=False silently swallows its weights, and a
+    # soft-loss run comes back as flat cross-entropy. The optimizer state then
+    # fails to load because the parameter count no longer matches -- which is
+    # how this was caught. The tokenizer is needed before the model, because the
+    # token layout is derived from it.
+    ckpt = torch.load(
+        os.path.join(ckpt_path, args.check_file), map_location="cpu",
+        weights_only=False,
     )
+    model_config = ModelArgs.from_dict(ckpt["model_config"])
 
-    # ckpt_path = os.path.join(os.path.dirname(__file__), "checkpoints", "llm_v2_material_llama_adamw_condition_latticelast_dim384")
-    # model,ckpt = LLamaTransformer.load(os.path.join(ckpt_path,"model_41_0.815.pt"),strict=False)
     ELEMENT_VOCAB = [Element.from_Z(i).symbol for i in range(1, 100)]
     LATTICE_STATS = {
         "a": (2.0, 10.0),
@@ -406,7 +454,7 @@ def load_model(args):
     else:
         print("Loading tokenizer from model")
         tokenizer = ckpt.get("tokenizer")
-        tokenizer = CrystalTokenizer.from_dict(tokenizer)
+        tokenizer = tokenizer_from_dict(tokenizer)
 
         so = getattr(tokenizer, "sequence_order", None)
         if so is None:
@@ -420,6 +468,30 @@ def load_model(args):
                     tokenizer, "sequence_order", SequenceOrder.ATOMS_FIRST
                 ),
             )
+
+    # Rebuilt from the same flags the run was launched with, so a resumed run
+    # continues the experiment it claims to resume.
+    coord_loss_config = (
+        None
+        if args.legacy_loss
+        else CoordLossConfig(
+            sigma_bins=args.coord_sigma_bins,
+            coord_weight=args.coord_weight,
+            hard_mix=args.coord_hard_mix,
+        )
+    )
+    model = LLamaTransformer(
+        params=model_config,
+        token_layout=tokenizer.token_layout(),
+        coord_loss_config=coord_loss_config,
+        sg_aux_weight=args.sg_aux_weight,
+    )
+    missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
+    if missing or unexpected:
+        # Loud on purpose: a silent mismatch here is a resumed run training a
+        # different model from the one that was saved.
+        print("state_dict missing=%r unexpected=%r" % (list(missing), list(unexpected)))
+    del ckpt["state_dict"]
 
     model = model.to(DEVICE)
     print("ROPE MODE", model.params.rope_mode)
@@ -528,7 +600,41 @@ if __name__ == "__main__":
         action="store_true",
         help="Use the original flat cross-entropy, for an A/B baseline.",
     )
+    parser.add_argument(
+        "--wyckoff",
+        action="store_true",
+        help="Tokenize in the Wyckoff representation: space group, then per orbit "
+             "species, Wyckoff position and free parameters only. Requires "
+             "--legacy_loss, since the structured loss assumes per-atom blocks.",
+    )
+    parser.add_argument(
+        "--wyckoff_canonical",
+        action="store_true",
+        help="--wyckoff with one description per crystal: orbits ordered by "
+             "electronegativity then Wyckoff letter, normaliser setting and "
+             "origin fixed (wyckoff_canonical.py). Implies --wyckoff.",
+    )
+    parser.add_argument(
+        "--snapshot_epochs",
+        type=int,
+        nargs="*",
+        default=[],
+        help="Also save a checkpoint after exactly these numbers of epochs, "
+             "whatever the validation loss, so a fixed budget can be evaluated.",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=2,
+        help="DataLoader workers. 0 is required with PYTORCH_CUDA_ALLOC_CONF="
+             "expandable_segments:True when the tokenizer holds CUDA tensors "
+             "(TOSS): those cannot be shared with worker processes.",
+    )
     args = parser.parse_args()
+    if args.wyckoff_canonical:
+        args.wyckoff = True
+    if args.wyckoff and not args.legacy_loss:
+        parser.error("--wyckoff requires --legacy_loss")
     
     
 
@@ -566,26 +672,38 @@ if __name__ == "__main__":
 
     # ELEMENT_VOCAB, LATTICE_STATS = calculate_stats_from_dataset(train_dataset)
 
-    tokenizer = CrystalTokenizer(
-        element_vocab=ELEMENT_VOCAB,
-        lattice_stats=LATTICE_STATS,
-        num_quant_bins=1024,
-        sorting_order=SortingOrder.REVERSE_SPECIES,  # SortingOrder.SPECIES,
-        sequence_order=SequenceOrder.ATOMS_FIRST,
-        oxidation_mode = ox_mode,
-        legacy_bin_grid=args.legacy_bin_grid,
-    )
-    print("TOKENIZER SORTING ORDER", tokenizer.sorting_order, tokenizer.sequence_order)
+    if args.wyckoff:
+        tokenizer = WyckoffTokenizer(
+            element_vocab=ELEMENT_VOCAB,
+            lattice_stats=LATTICE_STATS,
+            num_quant_bins=1024,
+            oxidation_mode=ox_mode,
+            canonical=args.wyckoff_canonical,
+        )
+        cache_prefix = "wyck2" if args.wyckoff_canonical else "wyck1"
+    else:
+        tokenizer = CrystalTokenizer(
+            element_vocab=ELEMENT_VOCAB,
+            lattice_stats=LATTICE_STATS,
+            num_quant_bins=1024,
+            sorting_order=SortingOrder.REVERSE_SPECIES,  # SortingOrder.SPECIES,
+            sequence_order=SequenceOrder.ATOMS_FIRST,
+            oxidation_mode = ox_mode,
+            legacy_bin_grid=args.legacy_bin_grid,
+        )
+        cache_prefix = 'v3' if args.legacy_bin_grid else 'v4grid'
+    print("TOKENIZER", type(tokenizer).__name__, "vocab", len(tokenizer),
+          tokenizer.sorting_order, tokenizer.sequence_order)
     train_crystals = CrystalDataset(
         train_dataset,
         tokenizer,
-        cache_path=f"{'v3' if args.legacy_bin_grid else 'v4grid'}_oxy_crystal_token_cache_latticelast_{dataset_name}_{ox_mode}_train_so{tokenizer.sorting_order.value}_seq{tokenizer.sequence_order}.joblib",
+        cache_path=f"{cache_prefix}_oxy_crystal_token_cache_latticelast_{dataset_name}_{ox_mode}_train_so{tokenizer.sorting_order.value}_seq{tokenizer.sequence_order}.joblib",
         recalculate_cache=False,
     )
     test_crystals = CrystalDataset(
         test_dataset,
         tokenizer,
-        cache_path=f"{'v3' if args.legacy_bin_grid else 'v4grid'}_oxy_crystal_token_cache_latticelast_{dataset_name}_{ox_mode}_test_so{tokenizer.sorting_order.value}_seq{tokenizer.sequence_order}.joblib",
+        cache_path=f"{cache_prefix}_oxy_crystal_token_cache_latticelast_{dataset_name}_{ox_mode}_test_so{tokenizer.sorting_order.value}_seq{tokenizer.sequence_order}.joblib",
         recalculate_cache=False,
     )
 
@@ -611,13 +729,13 @@ if __name__ == "__main__":
         train_crystals,
         batch_size=BATCH_SIZE,
         collate_fn=_train_collate_fn,
-        num_workers=2,
+        num_workers=args.num_workers,
     )
     test_loader = DataLoader(
         test_crystals,
         batch_size=BATCH_SIZE,
         collate_fn=_eval_collate_fn,
-        num_workers=2,
+        num_workers=args.num_workers,
     )
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -671,6 +789,14 @@ if __name__ == "__main__":
         if "optimizer" in checkpoint_data:
             print("Restoring optimizer state...")
             optimizer.load_state_dict(checkpoint_data["optimizer"])
+
+        # Only the fresh-model branch below binds ckpt_path and model_params, so
+        # without these two the resume path reached train_model and wandb.init
+        # with both names unbound. Saving continues into the directory the
+        # checkpoint was loaded from, which is what keeps one run's checkpoints
+        # in one place across a restart.
+        ckpt_path = full_ckpt_path
+        model_params = model.params
     else:
         
         print('----------------------No checkpoint provided----------------------------')
@@ -738,7 +864,7 @@ if __name__ == "__main__":
     
     exp_name = "train_"+dataset_name+"_"+ox_mode
         
-    wandb.login(key="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", relogin=True)
+    wandb.login()
     wandb.init(entity="dipannoydip",project="materium_bertos",name=exp_name, config=model_params)
     wandb.define_metric("epoch") # Define the epoch metric
     wandb.define_metric("train_loss", step_metric="epoch")
@@ -754,6 +880,7 @@ if __name__ == "__main__":
         device=DEVICE,
         ckpt_path=ckpt_path,
         start_epoch=start_epoch,
+        snapshot_epochs=set(args.snapshot_epochs),
     )
 
     RELAX_GENERATED_MATERIALS = False
@@ -762,7 +889,9 @@ if __name__ == "__main__":
     invalid_structures = 0
     for gen_idx in range(num_total_samples):
         try:
-            generated_material = generate_structure(
+            generated_material = (generate_wyckoff_structure
+                                  if getattr(tokenizer, "is_wyckoff", False)
+                                  else generate_structure)(
                 model, tokenizer, device=DEVICE, temperature=1.0
             )
             generated_material: Structure = tokenizer.detokenize(generated_material)

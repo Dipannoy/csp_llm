@@ -689,7 +689,7 @@ if __name__ == "__main__":
         # optimizer.load_state_dict(ckpt["optimizer"])
         # model = torch.compile(model) # This actually is slower?
         
-    wandb.login(key="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", relogin=True)
+    wandb.login()
     wandb.init(entity="dipannoydip",project="materium_bertos", config=model_params)
     wandb.define_metric("epoch") # Define the epoch metric
     wandb.define_metric("train_loss", step_metric="epoch")

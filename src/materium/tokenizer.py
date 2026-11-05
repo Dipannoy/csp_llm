@@ -745,6 +745,21 @@ class CrystalTokenizer:
         return weights
 
 
+def tokenizer_from_dict(json_data: Dict[str, any]):
+    """Rebuild whichever tokenizer a checkpoint or worker config describes.
+
+    Every loader used to call CrystalTokenizer.from_dict directly, which would
+    silently rebuild a Wyckoff checkpoint's tokenizer as the per-atom one and
+    decode its tokens as garbage. The config's "kind" says which class wrote it;
+    configs without one predate the Wyckoff tokenizer and are per-atom.
+    """
+    if json_data.get("kind") == "wyckoff":
+        # Imported here: wyckoff_tokenizer imports this module.
+        from materium.wyckoff_tokenizer import WyckoffTokenizer
+        return WyckoffTokenizer.from_dict(json_data)
+    return CrystalTokenizer.from_dict(dict(json_data))
+
+
 def calculate_stats_from_dataset(
     dataset: "MatterGenDataset",
 ) -> Tuple[List[str], Dict[str, Tuple[float, float]]]:

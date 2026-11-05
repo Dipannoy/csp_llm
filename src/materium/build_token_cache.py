@@ -22,6 +22,7 @@ from pymatgen.core import Element
 
 from materium.datasets import CrystalDataset, MatterGenDataset
 from materium.tokenizer import CrystalTokenizer, SequenceOrder, SortingOrder
+from materium.wyckoff_tokenizer import WyckoffTokenizer
 
 ELEMENT_VOCAB = [Element.from_Z(i).symbol for i in range(1, 100)]
 LATTICE_STATS = {
@@ -34,21 +35,34 @@ def main():
     dataset = sys.argv[1] if len(sys.argv) > 1 else "mp_20_heldout"
     ox_mode = sys.argv[2] if len(sys.argv) > 2 else "guess"
     legacy_grid = len(sys.argv) > 3 and sys.argv[3] == "legacy"
+    wyckoff = len(sys.argv) > 3 and sys.argv[3] in ("wyckoff", "wyckoff_canonical")
+    canonical = len(sys.argv) > 3 and sys.argv[3] == "wyckoff_canonical"
 
     # train.py resolves its data directory relative to its own module, which
     # lives beside this one.
     data_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
-    tokenizer = CrystalTokenizer(
-        element_vocab=ELEMENT_VOCAB,
-        lattice_stats=LATTICE_STATS,
-        num_quant_bins=1024,
-        sorting_order=SortingOrder.REVERSE_SPECIES,
-        sequence_order=SequenceOrder.ATOMS_FIRST,
-        oxidation_mode=ox_mode,
-        legacy_bin_grid=legacy_grid,
-    )
-    prefix = "v3" if legacy_grid else "v4grid"
+    if wyckoff:
+        # Must match train.py --wyckoff exactly, cache prefix included.
+        tokenizer = WyckoffTokenizer(
+            element_vocab=ELEMENT_VOCAB,
+            lattice_stats=LATTICE_STATS,
+            num_quant_bins=1024,
+            oxidation_mode=ox_mode,
+            canonical=canonical,
+        )
+        prefix = "wyck2" if canonical else "wyck1"
+    else:
+        tokenizer = CrystalTokenizer(
+            element_vocab=ELEMENT_VOCAB,
+            lattice_stats=LATTICE_STATS,
+            num_quant_bins=1024,
+            sorting_order=SortingOrder.REVERSE_SPECIES,
+            sequence_order=SequenceOrder.ATOMS_FIRST,
+            oxidation_mode=ox_mode,
+            legacy_bin_grid=legacy_grid,
+        )
+        prefix = "v3" if legacy_grid else "v4grid"
     print("dataset=%s ox=%s grid=%s" % (dataset, ox_mode, prefix), flush=True)
 
     # train.py reads the validation split but names its cache "test".

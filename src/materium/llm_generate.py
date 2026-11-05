@@ -32,7 +32,9 @@ from materium.tokenizer import (
     SortingOrder,
     SequenceOrder,
     calculate_stats_from_dataset,
+    tokenizer_from_dict,
 )
+from materium.wyckoff_generation import generate_wyckoff_structure
 
 from mattersim.applications.relax import Relaxer
 import json
@@ -230,7 +232,11 @@ def run_generation(
     for gen_idx in range(num_total_samples):
         try:
             start_time = time.time()
-            generated_tokens = generate_structure(
+            # A Wyckoff checkpoint needs its own decoder: the per-atom sampler's
+            # slot arithmetic assumes fixed four-token atom blocks.
+            gen = (generate_wyckoff_structure if getattr(tokenizer, "is_wyckoff", False)
+                   else generate_structure)
+            generated_tokens = gen(
                 model,
                 tokenizer,
                 device=DEVICE,
@@ -354,7 +360,7 @@ def load_model(args):
     else:
         print("Loading tokenizer from model")
         tokenizer = ckpt.get("tokenizer")
-        tokenizer = CrystalTokenizer.from_dict(tokenizer)
+        tokenizer = tokenizer_from_dict(tokenizer)
 
         so = getattr(tokenizer, "sequence_order", None)
         if so is None:

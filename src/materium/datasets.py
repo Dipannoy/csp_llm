@@ -16,7 +16,7 @@ import os
 import re
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
-from materium.tokenizer import CrystalTokenizer
+from materium.tokenizer import CrystalTokenizer, tokenizer_from_dict
 from materium.coord_loss import (
     TokenLayout,
     apply_translation_augmentation,
@@ -400,7 +400,7 @@ def _worker_initializer(tokenizer_dict: dict, data_path: str) -> None:
     inter-process pipe — each task message is just a single integer index.
     """
     global _WORKER_TOKENIZER, _WORKER_DATASET
-    _WORKER_TOKENIZER = CrystalTokenizer.from_dict(tokenizer_dict)
+    _WORKER_TOKENIZER = tokenizer_from_dict(tokenizer_dict)
     _WORKER_DATASET = MatterGenDataset(
         data_path, recalculate_cache=False, lattice_scaler=None
     )

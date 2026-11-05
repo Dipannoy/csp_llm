@@ -25,7 +25,8 @@ import torch
 
 from materium.generation_utils import generate_structure
 from materium.model import LLamaTransformer
-from materium.tokenizer import CrystalTokenizer
+from materium.tokenizer import tokenizer_from_dict
+from materium.wyckoff_generation import generate_wyckoff_structure
 
 
 def load(ckpt_dir, ckpt_file, device):
@@ -38,7 +39,7 @@ def load(ckpt_dir, ckpt_file, device):
     cfg = ckpt.get("tokenizer")
     if cfg is None:
         sys.exit("checkpoint carries no tokenizer config: %s" % path)
-    tok = CrystalTokenizer.from_dict(cfg)
+    tok = tokenizer_from_dict(cfg)
     model = model.to(device).eval()
     return model, tok
 
@@ -77,6 +78,7 @@ def main():
 
     model, tok = load(args.ckpt_dir, args.ckpt_file, device)
     constrain = args.formula_mode == "strict"
+    gen = generate_wyckoff_structure if getattr(tok, "is_wyckoff", False) else generate_structure
 
     t0 = time.time()
     done = written = invalid = skipped = 0
@@ -96,7 +98,7 @@ def main():
 
             for i in range(args.num_samples):
                 try:
-                    toks = generate_structure(
+                    toks = gen(
                         model, tok,
                         device=device,
                         temperature=args.temperature,
