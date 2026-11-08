@@ -1,3 +1,13 @@
+# Oxidation-state-guided LLM generation of crystal structures
+
+Autoregressive language-model generation of crystals, guided by a transformer oxidation-state model so that generated structures follow the exact target formula.
+
+**My additions (Dipannoy Das Gupta)** on top of the Materium crystal-LLM codebase described below:
+- **Formula-exact, oxidation-state-constrained generation** (`generation_utils.py`). The species an atom slot can sample are restricted to the oxidation states that a BERTOS-style predictor assigns to the target formula, with charge-neutrality and composition controls.
+- **Coordinate-aware training loss** (`coord_loss.py`), with matching updates to the tokenizer, model and training loop.
+
+---
+
 # Materium
 This is the repository to leverage transformer based oxidation state model to facilitate the LLM based autoregressive approach for material generation.
 
